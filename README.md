@@ -76,7 +76,7 @@ The role decides four things: the prompt, the capability set enforced on every t
 cd <this folder>
 npm install
 npm run typecheck # tsc --noEmit, strict
-npm test          # offline tests; no key or network needed
+npm test          # offline tests (node --test); no key or network needed
 ```
 
 ## Configure Claude Desktop
@@ -144,7 +144,7 @@ The `command` **must** be an absolute path to `node.exe`. If you manage Node wit
 
 ## Layout
 
-TypeScript, run as-is on Node 22.18+ (type stripping), so only erasable syntax is used: no `enum`, `namespace` or parameter properties, and imports of local files carry the `.ts` extension. `npm run typecheck` is the compiler check; `npm test` and `npm run smoke` run the `.ts` files directly.
+TypeScript, run as-is on Node 22.18+ (type stripping), so only erasable syntax is used: no `enum`, `namespace` or parameter properties, and imports of local files carry the `.ts` extension. `npm run typecheck` is the compiler check; `npm test` and `npm run smoke` run the `.ts` files directly. Run one test file with `node --test test/gates.test.ts`.
 
 ```
 src/server.ts    MCP tools + job orchestration
@@ -158,7 +158,8 @@ src/branching.ts Where jobs start, which branch they use, restoring your branch
 src/config.ts    Environment-driven settings
 src/types.ts     Shared types (roles, jobs, results)
 tsconfig.json    Strict type-check config (tsc --noEmit; nothing is emitted)
-test/tools.ts    Offline tests (mock DeepSeek + throwaway git repo; needs git)
+test/            Offline tests on node:test (mock DeepSeek + throwaway git repo; needs git):
+                 sandbox, repo, gates, agent, branching (*.test.ts), shared fixture in helpers.ts
 ```
 
 - Add `specs/.jobs/` and `specs/review/` to your repo's `.gitignore`.

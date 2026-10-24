@@ -10,7 +10,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck",
-    "test": "node test/tools.ts",
+    "test": "node --test \"test/*.test.ts\"",
     "smoke": "node scripts/smoke.ts"
   },
   "dependencies": {
