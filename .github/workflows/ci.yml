@@ -37,8 +37,8 @@ jobs:
 
       - run: npm ci
 
-      - name: Syntax check
-        run: npm run check
+      - name: Type check (tsc --noEmit, strict)
+        run: npm run typecheck
 
       - name: Offline tests (mock DeepSeek server, no network, no secrets)
         run: npm test

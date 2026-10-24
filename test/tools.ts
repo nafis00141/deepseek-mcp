@@ -8,20 +8,49 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
+import type { AddressInfo } from "node:net";
+import type { ChatMessage, ToolSchema } from "../src/engine.ts";
+import type { Task } from "../src/taskfile.ts";
+import type { ExecResult, Job } from "../src/types.ts";
+
+// The checks below probe untrusted-JSON shapes (tool results, gate output); predicates take loose values on purpose.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Loose = any;
+
+/** Complete fixtures: tests override only the fields they care about. */
+const mkTask = (p: Partial<Task> = {}): Task => ({ path: "", rel: "specs/demo/tasks/01-x.md", id: "01", allowedPaths: [], dependsOn: [], testCommand: "", body: "", ...p });
+const mkJob = (p: Partial<Job> = {}): Job => ({
+  jobId: "00000000", key: "", role: "impl", mode: "code", artifact: null, headings: [], targetRel: "", branch: null, reviewBranch: null,
+  baseBranch: "main", baseSha: "", switched: false, createdBranch: false, startedFrom: null, task: null, allowedPaths: [], startedSha: "",
+  startedChanges: {}, logPath: "", promptPath: "", packChars: 0, startedAt: "", state: "running", ...p,
+});
+/** A gate input: only the fields a test sets are meaningful. */
+const mkRes = (p: Partial<ExecResult> = {}): ExecResult => ({ isError: false, turns: 1, usage: null, result: "", summary: null, gap: null, ...p });
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "dsmcp-"));
 const repo = path.join(tmp, "repo");
 fs.mkdirSync(repo);
 
 // Mock DeepSeek: pops one scripted reply per request.
-const script = [];
-const bodies = [];
+interface Scripted {
+  message?: ChatMessage;
+  status?: number;
+  finish_reason?: string;
+}
+interface SeenBody {
+  messages?: unknown[];
+  thinking?: { type?: string };
+  reasoning_effort?: string;
+  temperature?: number;
+}
+const script: Scripted[] = [];
+const bodies: SeenBody[] = [];
 const mock = http.createServer((req, res) => {
   let raw = "";
-  req.on("data", (c) => (raw += c));
+  req.on("data", (c: Buffer) => (raw += c));
   req.on("end", () => {
     try {
-      bodies.push(JSON.parse(raw));
+      bodies.push(JSON.parse(raw) as SeenBody);
     } catch {
       /* not json */
     }
@@ -34,14 +63,14 @@ const mock = http.createServer((req, res) => {
     res.end(JSON.stringify({ choices: [{ message: next.message, finish_reason: next.finish_reason ?? "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
   });
 });
-await new Promise((r) => mock.listen(0, "127.0.0.1", r));
+await new Promise<void>((r) => mock.listen(0, "127.0.0.1", () => r()));
 
 // Must be set before config.js is imported (and beat any developer .env).
 Object.assign(process.env, {
   REPO_ROOT: repo,
   BASE_REF: "main",
   DEEPSEEK_API_KEY: "test-key",
-  DEEPSEEK_BASE_URL: `http://127.0.0.1:${mock.address().port}`,
+  DEEPSEEK_BASE_URL: `http://127.0.0.1:${(mock.address() as AddressInfo).port}`,
   GIT_AUTHOR_NAME: "t",
   GIT_AUTHOR_EMAIL: "t@t",
   GIT_COMMITTER_NAME: "t",
@@ -49,27 +78,38 @@ Object.assign(process.env, {
 });
 
 // Same git lookup the server uses (GIT_BIN, PATH, SourceTree's copy, Program Files), not just PATH.
-const { CFG } = await import("../src/config.js");
-const sh = (cmd, args) => spawnSync(cmd === "git" ? CFG.git : cmd, args, { cwd: repo, encoding: "utf8" });
+const { CFG } = await import( "../src/config.ts");
+const sh = (cmd: string, args: string[]) => spawnSync(cmd === "git" ? CFG.git : cmd, args, { cwd: repo, encoding: "utf8" });
 if (sh("git", ["--version"]).status !== 0) {
   console.error(`FAIL: git not found (tried: ${CFG.git}). Install Git for Windows or set GIT_BIN to git.exe, then rerun.`);
   process.exit(1);
 }
 
-const { executeTool, capsFor, packResult, runAgent } = await import("../src/engine.js");
-const { ROLES, buildPrompt } = await import("../src/roles.js");
-const { buildContextPack } = await import("../src/context.js");
-const { parseSummary, changedFiles, runCmd, snapshot, commit, git, detectRepoEol, childEnv, jobDiff } = await import("../src/repo.js");
-const { matchAny, readTask, scopeProblems, globsOverlap, isTestGlob } = await import("../src/taskfile.js");
-const { gate, makeVerifier, report } = await import("../src/gates.js");
-const { planBranch, latestBranchFor, restoreBranch, branchExists, discardBranch } = await import("../src/branching.js");
+const { executeTool, capsFor, packResult, runAgent } = await import( "../src/engine.ts");
+const { ROLES, buildPrompt } = await import( "../src/roles.ts");
+const { buildContextPack } = await import( "../src/context.ts");
+const repoMod = await import( "../src/repo.ts");
+const { parseSummary, changedFiles, runCmd, snapshot, commit, git, detectRepoEol, childEnv } = repoMod;
+const jobDiff = (j: Loose, off?: number, chunk?: number): Loose => repoMod.jobDiff(j, off, chunk);
+const { matchAny, readTask, scopeProblems, globsOverlap, isTestGlob } = await import( "../src/taskfile.ts");
+const gates = await import( "../src/gates.ts");
+const { report } = gates;
+const makeVerifier = (mode: Loose, task: Loose): ((t: string) => Promise<Loose>) => gates.makeVerifier(mode, task) as Loose;
+// Tests feed partial jobs/results on purpose; these wrappers accept loose shapes and return loose results.
+const gate = (job: Loose, res: Loose): Promise<Loose> => gates.gate(mkJob(job), mkRes(res));
+const branching = await import( "../src/branching.ts");
+const { branchExists } = branching;
+const planBranch = (a: Loose): Loose => branching.planBranch(a);
+const latestBranchFor = (h: Loose, t: string) => branching.latestBranchFor(h, t);
+const restoreBranch = (j: Loose): Loose => branching.restoreBranch(j);
+const discardBranch = (a: Loose): Loose => branching.discardBranch(a);
 
 let pass = 0;
 let fail = 0;
-const check = (label, got, want) => {
-  let ok;
-  if (typeof want === "function") ok = want(got);
-  else if (typeof want === "string") ok = typeof got === "string" ? got === want : Boolean(got && got.error && String(got.error).includes(want));
+const check = (label: string, got: unknown, want: unknown): void => {
+  let ok: boolean;
+  if (typeof want === "function") ok = Boolean((want as (g: unknown) => unknown)(got));
+  else if (typeof want === "string") ok = typeof got === "string" ? got === want : Boolean(got && (got as { error?: unknown }).error && String((got as { error?: unknown }).error).includes(want));
   else ok = JSON.stringify(got) === JSON.stringify(want);
   if (ok) pass++;
   else {
@@ -78,7 +118,7 @@ const check = (label, got, want) => {
   }
   console.log(`${ok ? "ok  " : "FAIL"} ${label}`);
 };
-const put = (rel, content) => {
+const put = (rel: string, content: string): void => {
   const abs = path.join(repo, rel);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, content);
@@ -94,7 +134,7 @@ put(".gitignore", ".env\nspecs/.jobs/\n");
 sh("git", ["add", "."]);
 sh("git", ["commit", "-qm", "init"]);
 
-const task = { allowedPaths: ["src/**", "tests/**"], testCommand: "echo ok", id: "01", rel: "specs/demo/tasks/01-x.md" };
+const task = mkTask({ allowedPaths: ["src/**", "tests/**"], testCommand: "echo ok" });
 const caps = capsFor("impl", ROLES.impl, task);
 
 // --- write / edit / read / grep --------------------------------------------
@@ -106,7 +146,7 @@ check("write via src/../ traversal", await executeTool("write_file", { path: "sr
 check("traversal left the file untouched", fs.readFileSync(path.join(repo, "package.json"), "utf8") === before, true);
 check("./ prefix is normalised", await executeTool("write_file", { path: "./src/x2.txt", content: "y" }, caps), { written: "src/x2.txt", bytes: 1 });
 check("env files are never writable", await executeTool("write_file", { path: "src/.env", content: "x" }, caps), "not permitted");
-check("code roles cannot write specs/", await executeTool("write_file", { path: "specs/x.md", content: "x" }, capsFor("impl", ROLES.impl, { ...task, allowedPaths: ["specs/**"] })), "not permitted");
+check("code roles cannot write specs/", await executeTool("write_file", { path: "specs/x.md", content: "x" }, capsFor("impl", ROLES.impl, mkTask({ ...task, allowedPaths: ["specs/**"] }))), "not permitted");
 if (process.platform !== "win32") {
   const outside = path.join(tmp, "outside");
   fs.mkdirSync(outside);
@@ -120,14 +160,14 @@ check("read returns numbered lines", (await executeTool("read_file", { path: "sr
 check("read refuses .env", await executeTool("read_file", { path: ".env" }, caps), "not permitted");
 check("grep finds the file", (await executeTool("grep", { pattern: "world", path: "src" }, caps)).count, 1);
 check("grep never reads .env", (await executeTool("grep", { pattern: "hunter2" }, caps)).count, 0);
-check("list_dir hides .env", (await executeTool("list_dir", { path: "." }, caps)).entries.includes(".env"), false);
+check("list_dir hides .env", ((await executeTool("list_dir", { path: "." }, caps)).entries as string[]).includes(".env"), false);
 check("run_tests runs declared command", (await executeTool("run_tests", {}, caps)).pass, true);
 
 // --- line endings ------------------------------------------------------------
 put("src/crlf.js", "a\r\nb\r\nc\r\n");
 put("src/lf.js", "a\nb\n");
 put("src/mix.js", "a\r\nb\nc\n");
-const read = (r) => fs.readFileSync(path.join(repo, r), "utf8");
+const read = (r: string): string => fs.readFileSync(path.join(repo, r), "utf8");
 check("edit: multi-line old matches a CRLF file", (await executeTool("edit_file", { path: "src/crlf.js", old: "a\nb", new: "x\ny" }, caps)).edited, "src/crlf.js");
 check("edit: CRLF file stays pure CRLF", read("src/crlf.js"), "x\r\ny\r\nc\r\n");
 await executeTool("edit_file", { path: "src/lf.js", old: "a\nb", new: "x\ny" }, caps);
@@ -171,12 +211,12 @@ check("doc role writes under specs/", await executeTool("write_file", { path: "s
 check("doc role blocked outside specs/", await executeTool("write_file", { path: "src/nope.ts", content: "x" }, doc), "not permitted");
 
 const testCaps = capsFor("test", ROLES.test, task);
-check("test role may write tests/", await executeTool("write_file", { path: "tests/a.test.ts", content: "x" }, testCaps), (r) => !r.error);
+check("test role may write tests/", await executeTool("write_file", { path: "tests/a.test.ts", content: "x" }, testCaps), (r: Loose) => !r.error);
 check("test role blocked from src/", await executeTool("write_file", { path: "src/a.ts", content: "x" }, testCaps), "not permitted");
-check("test role with no test glob is read-only", await executeTool("write_file", { path: "src/a.ts", content: "x" }, capsFor("test", ROLES.test, { ...task, allowedPaths: ["src/**"] })), "read-only");
+check("test role with no test glob is read-only", await executeTool("write_file", { path: "src/a.ts", content: "x" }, capsFor("test", ROLES.test, mkTask({ ...task, allowedPaths: ["src/**"] }))), "read-only");
 
 // --- pure helpers -----------------------------------------------------------
-check("packResult stays valid JSON when oversized", (() => { try { return JSON.parse(packResult({ x: "a".repeat(60000) })).error; } catch { return null; } })(), (e) => /too large/.test(e));
+check("packResult stays valid JSON when oversized", (() => { try { return (JSON.parse(packResult({ x: "a".repeat(60000) })) as { error: string }).error; } catch { return null; } })(), (e: Loose) => /too large/.test(e));
 check("glob: ** spans directories", matchAny("src/a/b/x.js", ["src/**/x.js"]), true);
 check("glob: **/ matches zero directories", matchAny("src/x.js", ["src/**/x.js"]), true);
 check("glob: * stays in one directory", matchAny("src/a/b.ts", ["src/*.ts"]), false);
@@ -221,16 +261,16 @@ process.env.PATH = savedPath;
 process.env.Path = "/should/not/survive"; // a second spelling, as Windows sometimes has
 const envKeys = Object.keys(childEnv()).filter((k) => k.toLowerCase() === "path");
 check("child env has exactly one PATH variable", envKeys.length, 1);
-check("...and it starts with the server's node directory", childEnv()[envKeys[0]].startsWith(path.dirname(process.execPath)), true);
+check("...and it starts with the server's node directory", (childEnv()[envKeys[0] as string] ?? "").startsWith(path.dirname(process.execPath)), true);
 delete process.env.Path;
 check("failing command reports failure", (await runCmd(`node -e "process.exit(3)"`)).pass, false);
 
 // --- gates: docs -------------------------------------------------------------
 const planV1 = "# Plan\n## Approach\n" + "first draft of the approach. ".repeat(12);
 put("specs/demo/plan.md", planV1);
-const docJob = (extra = {}) => ({ role: "plan", mode: "doc", targetRel: "specs/demo", artifact: "plan.md", headings: ["## Approach"], startedChanges: snapshot(), ...extra });
+const docJob = (extra = {}): Loose => ({ role: "plan", mode: "doc", targetRel: "specs/demo", artifact: "plan.md", headings: ["## Approach"], startedChanges: snapshot(), ...extra });
 const unchanged = docJob();
-check("doc gate: untouched artifact is 'no files were written'", (await gate(unchanged, { summary: { status: "done" }, turns: 1 })).reasons.join("|"), (r) => /no files were written/.test(r));
+check("doc gate: untouched artifact is 'no files were written'", (await gate(unchanged, { summary: { status: "done" }, turns: 1 })).reasons.join("|"), (r: Loose) => /no files were written/.test(r));
 const rewrite = docJob();
 put("specs/demo/plan.md", planV1 + "second pass adds more text. ".repeat(5));
 check("doc gate: rewriting a dirty artifact counts", (await gate(rewrite, { summary: { status: "done" }, turns: 1 })).status, "done");
@@ -238,12 +278,12 @@ check("doc gate: rewriting a dirty artifact counts", (await gate(rewrite, { summ
 put("specs/demo/tasks/01-a.md", "---\nid: 01\nallowed_paths: [src/**]\ntest_command: npm test\n---\n# Task 01\n## Acceptance criteria\n- AC-1\n");
 put("specs/demo/tasks/02-b.md", "---\nid: 02\nallowed_paths: [src/b/**]\ntest_command: npm run nope\n---\n# Task 02\n## Acceptance criteria\n- AC-2\n");
 const tg = await gate({ role: "tasks", mode: "doc", targetRel: "specs/demo", artifact: "tasks/", startedChanges: {} }, { summary: { status: "done" }, turns: 1 });
-check("tasks gate: overlapping scopes caught", tg.reasons.some((r) => /overlap/.test(r)), true);
-check("tasks gate: unknown npm script caught", tg.reasons.some((r) => /nope/.test(r)), true);
+check("tasks gate: overlapping scopes caught", tg.reasons.some((r: string) => /overlap/.test(r)), true);
+check("tasks gate: unknown npm script caught", tg.reasons.some((r: string) => /nope/.test(r)), true);
 fs.rmSync(path.join(repo, "specs"), { recursive: true, force: true });
 
 // --- gates: review -----------------------------------------------------------
-const rv = (summary) => gate({ role: "review", mode: "review", targetRel: "specs/demo" }, { summary, result: "notes", turns: 1 });
+const rv = (summary: Loose) => gate({ role: "review", mode: "review", targetRel: "specs/demo" }, { summary, result: "notes", turns: 1 });
 const forced = await rv({ verdict: "PASS", criteria: [{ id: "AC-1", status: "met" }], findings: [{ id: "F1", severity: "blocker", file: "src/a.js" }] });
 check("review gate: PASS with a blocker becomes FAIL", forced.verdict, "FAIL");
 check("review gate: unmet criterion forces FAIL", (await rv({ verdict: "PASS", criteria: [{ id: "AC-1", status: "not met" }], findings: [] })).verdict, "FAIL");
@@ -253,8 +293,8 @@ check("review gate: clean PASS stays PASS", (await rv({ verdict: "PASS", criteri
 fs.rmSync(path.join(repo, "specs"), { recursive: true, force: true });
 put("specs/demo/tasks/01-feature.md", "---\nid: 01\nallowed_paths: [src/**, tests/**]\ntest_command: node --version\n---\n# Task 01\n## Acceptance criteria\n- AC-1\n");
 const t1 = readTask("specs/demo/tasks/01-feature.md");
-const call = (name, args) => ({ message: { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name, arguments: JSON.stringify(args) } }] } });
-const final = { message: { role: "assistant", content: 'Done.\n```json\n{"status":"done","did":["added feature"],"not_done":[],"notes":""}\n```' } };
+const call = (name: string, args: unknown): Scripted => ({ message: { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name, arguments: JSON.stringify(args) } }] } });
+const final: Scripted = { message: { role: "assistant", content: 'Done.\n```json\n{"status":"done","did":["added feature"],"not_done":[],"notes":""}\n```' } };
 
 git(["checkout", "-q", "-b", "impl/01"]);
 const startedSha = git(["rev-parse", "HEAD"]).out;
@@ -286,27 +326,27 @@ const endSha = git(["rev-parse", "HEAD"]).out;
 const dj = jobDiff({ startedSha, endSha, role: "impl" });
 check("job_diff: lists the committed file", dj.files, ["src/feature.js"]);
 check("job_diff: contains the change with context", dj.diff.includes("+export const x = 1;") && dj.stat.includes("src/feature.js"), true);
-const paged = [];
-for (let off = 0, d; ; off = d.next_offset) {
+const paged: string[] = [];
+for (let off = 0, d: Loose; ; off = d.next_offset) {
   d = jobDiff({ startedSha, endSha }, off, 40);
   paged.push(d.diff);
   if (d.next_offset === null) break;
 }
 check("job_diff: pages reassemble into the full diff", paged.join(""), dj.diff);
-check("job_diff: a job with no range explains itself", jobDiff({ role: "spec" }).error, (e) => /no committed code range/.test(e));
+check("job_diff: a job with no range explains itself", jobDiff({ role: "spec" }).error, (e: Loose) => /no committed code range/.test(e));
 check("job_diff: an empty range is reported as empty", jobDiff({ startedSha: endSha, endSha }).empty, true);
 check("code gate: returns a small report", good.report, { status: "done", did: ["added feature"], not_done: [], notes: "", repairs: [] });
-check("code gate: status=blocked is a failure", (await gate(codeJob, { summary: { status: "blocked", did: [], not_done: ["x"] }, turns: 1 })).reasons.some((r) => /status=blocked/.test(r)), true);
+check("code gate: status=blocked is a failure", (await gate(codeJob, { summary: { status: "blocked", did: [], not_done: ["x"] }, turns: 1 })).reasons.some((r: string) => /status=blocked/.test(r)), true);
 
 put("src/stray.js", "x\n"); // outside nothing - but untracked and not committed
 put("docs/leak.md", "x\n");
 const bad = await gate(codeJob, { summary: parseSummary(run.finalText), turns: run.turns, usage: run.usage });
-check("code gate: new out-of-scope file fails", bad.status === "failed" && bad.reasons.some((r) => /out of scope: .*docs\/leak\.md/.test(r)), true);
-check("code gate: already-dirty specs/ files are not blamed", !bad.reasons.some((r) => /specs\//.test(r)), true);
+check("code gate: new out-of-scope file fails", bad.status === "failed" && bad.reasons.some((r: string) => /out of scope: .*docs\/leak\.md/.test(r)), true);
+check("code gate: already-dirty specs/ files are not blamed", !bad.reasons.some((r: string) => /specs\//.test(r)), true);
 
 // --- repair loop -------------------------------------------------------------
 put("scripts/chk.js", "process.exit(require('fs').existsSync('src/ok.txt') ? 0 : 1)");
-const t2 = { allowedPaths: ["src/**"], testCommand: "node scripts/chk.js", id: "02", rel: "x.md" };
+const t2 = mkTask({ allowedPaths: ["src/**"], testCommand: "node scripts/chk.js", id: "02", rel: "x.md" });
 const caps2 = capsFor("impl", ROLES.impl, t2);
 const verify2 = makeVerifier("code", t2);
 check("verifier: missing json asks for the summary", (await verify2("all done")).why, "no summary json");
@@ -335,7 +375,7 @@ check("repair: stops after MAX_REPAIRS and hands over", capped.repairs.length ==
 sh("git", ["reset", "-q", "--hard"]);
 sh("git", ["clean", "-fdq"]);
 sh("git", ["checkout", "-q", "main"]);
-const mkBranch = (name, file) => {
+const mkBranch = (name: string, file?: string): void => {
   sh("git", ["checkout", "-q", "-b", name, "main"]);
   if (file) {
     put(file, `${name}\n`);
@@ -344,9 +384,9 @@ const mkBranch = (name, file) => {
   }
   sh("git", ["checkout", "-q", "main"]);
 };
-const sha = (ref) => git(["rev-parse", ref]).out;
-const taskB = { id: "02", rel: "specs/f/tasks/02-b.md", dependsOn: ["01"] };
-const hist = (t, branch, role = "impl", target = `specs/f/tasks/${t}-x.md`) => ({ task: t, role, state: "done", branch, targetRel: target });
+const sha = (ref: string): string => git(["rev-parse", ref]).out;
+const taskB: Loose = { id: "02", rel: "specs/f/tasks/02-b.md", dependsOn: ["01"] };
+const hist = (t: string, branch: string, role = "impl", target = `specs/f/tasks/${t}-x.md`): Loose => ({ task: t, role, state: "done", branch, targetRel: target });
 
 check("branching: impl with no deps starts from the base", planBranch({ roleName: "impl", task: { id: "01", rel: "specs/f/tasks/01-a.md", dependsOn: [] }, targetRel: "x", history: [], baseRef: "main" }), { mode: "new", from: "main" });
 mkBranch("dep1", "dep1.txt");
@@ -356,9 +396,9 @@ check("branching: a merged dependency starts from the base again", planBranch({ 
 sh("git", ["reset", "-q", "--hard", "HEAD~1"]); // un-merge so later cases can reuse dep1
 mkBranch("dep3", "dep3.txt");
 mkBranch("dep4", "dep4.txt");
-check("branching: two unmerged dependencies are refused", planBranch({ roleName: "impl", task: { ...taskB, dependsOn: ["03", "04"] }, targetRel: "x", history: [hist("03", "dep3"), hist("04", "dep4")], baseRef: "main" }).error, (e) => /2 unmerged/.test(e));
+check("branching: two unmerged dependencies are refused", planBranch({ roleName: "impl", task: { ...taskB, dependsOn: ["03", "04"] }, targetRel: "x", history: [hist("03", "dep3"), hist("04", "dep4")], baseRef: "main" }).error, (e: Loose) => /2 unmerged/.test(e));
 check("branching: fix continues the task's own branch", planBranch({ roleName: "fix", task: taskB, targetRel: "T", history: [hist("02", "dep3", "impl", "T")], baseRef: "main" }), { mode: "continue", branch: "dep3", from: "dep3" });
-check("branching: fix with no branch is refused", planBranch({ roleName: "fix", task: taskB, targetRel: "T", history: [hist("02", "gone", "impl", "T")], baseRef: "main" }).error, (e) => /run impl first/.test(e));
+check("branching: fix with no branch is refused", planBranch({ roleName: "fix", task: taskB, targetRel: "T", history: [hist("02", "gone", "impl", "T")], baseRef: "main" }).error, (e: Loose) => /run impl first/.test(e));
 check("branching: test with no branch starts from the base", planBranch({ roleName: "test", task: taskB, targetRel: "T", history: [], baseRef: "main" }).mode, "new");
 check("branching: review picks the newest branch under the feature", latestBranchFor([hist("01", "dep1"), hist("02", "dep3", "fix")], "specs/f"), "dep3");
 check("branching: review ignores other features", latestBranchFor([hist("01", "dep1")], "specs/other"), null);
@@ -380,10 +420,10 @@ sh("git", ["checkout", "-q", "main"]);
 check("restore: nothing to do when the job never switched", restoreBranch({ switched: false, baseBranch: "main" }), {});
 
 // --- thinking mode -----------------------------------------------------------
-const { requestBody } = await import("../src/engine.js");
-const tl = [{ type: "function", function: { name: "x" } }];
+const { requestBody } = await import( "../src/engine.ts");
+const tl = [{ type: "function", function: { name: "x" } }] as unknown as ToolSchema[];
 check("thinking: enabled + high is the default", [CFG.thinking, CFG.effort], ["enabled", "high"]);
-check("thinking: default request carries thinking+effort and no temperature", ((b) => [b.thinking, b.reasoning_effort, "temperature" in b])(requestBody([], tl)), [{ type: "enabled" }, "high", false]);
+check("thinking: default request carries thinking+effort and no temperature", (((b: Loose) => [b.thinking, b.reasoning_effort, "temperature" in b])(requestBody([], tl) as Loose)), [{ type: "enabled" }, "high", false]);
 check("thinking: default token budget leaves room for reasoning", CFG.maxTokens >= 32000, true);
 const off = requestBody([], [], { model: "m", maxTokens: 8000, thinking: "disabled", effort: "high", temperature: 0.2 });
 check("thinking: disabled is sent explicitly, with temperature and no effort", [off.thinking, off.temperature, "reasoning_effort" in off], [{ type: "disabled" }, 0.2, false]);
@@ -407,12 +447,12 @@ mkBranch("done1", "done1.txt");
 sh("git", ["merge", "-q", "done1"]);
 const d3 = discardBranch({ branch: "done1", baseRef: "main" });
 check("discard: a merged branch goes without force", d3.deleted === "done1" && d3.was_merged === true && !d3.recover && !branchExists("done1"), true);
-check("discard: the base branch is never deleted", discardBranch({ branch: "main", baseRef: "main", force: true }).error, (e) => /base branch/.test(e));
+check("discard: the base branch is never deleted", discardBranch({ branch: "main", baseRef: "main", force: true }).error, (e: Loose) => /base branch/.test(e));
 sh("git", ["checkout", "-q", "dep4"]);
-check("discard: the checked-out branch is refused", discardBranch({ branch: "dep4", baseRef: "main", force: true }).error, (e) => /checked out/.test(e) && branchExists("dep4"));
+check("discard: the checked-out branch is refused", discardBranch({ branch: "dep4", baseRef: "main", force: true }).error, (e: Loose) => /checked out/.test(e) && branchExists("dep4"));
 sh("git", ["checkout", "-q", "main"]);
 check("discard: a missing branch is reported as gone", discardBranch({ branch: "nope", baseRef: "main" }).gone, true);
-check("discard: unsafe branch names are rejected", discardBranch({ branch: "--force; rm", baseRef: "main", force: true }).error, (e) => /usable branch/.test(e));
+check("discard: unsafe branch names are rejected", discardBranch({ branch: "--force; rm", baseRef: "main", force: true }).error, (e: Loose) => /usable branch/.test(e));
 check("discard: tags and other refs are not branches", (sh("git", ["tag", "v1"]), discardBranch({ branch: "v1", baseRef: "main", force: true }).gone), true);
 
 mock.close();

@@ -1,19 +1,25 @@
 import fs from "node:fs";
 import path from "node:path";
-import { CFG } from "./config.js";
-import { changedFiles, commitsBetween, diffFilesAgainst, diffFilesBetween, diffSize, parseSummary, rel, runCmd, snapshot, toPosix } from "./repo.js";
-import { globsOverlap, isDeniedWrite, matchAny, normRel, readTask, scopeFor, scopeProblems } from "./taskfile.js";
+import { CFG } from "./config.ts";
+import { changedFiles, commitsBetween, diffFilesAgainst, diffFilesBetween, diffSize, parseSummary, rel, runCmd, snapshot, toPosix } from "./repo.ts";
+import { globsOverlap, isDeniedWrite, matchAny, normRel, readTask, scopeFor, scopeProblems } from "./taskfile.ts";
+import type { Task } from "./taskfile.ts";
+import type { VerifyProblem } from "./engine.ts";
+import type { ExecResult, Job, JobResult } from "./types.ts";
 
-const stamp = () => new Date().toISOString().replace(/\.\d+Z$/, "").replace(/[-:]/g, "").replace("T", "-");
-const clip = (s, n = 1400) => (s.length > n ? s.slice(0, n) + "\n..." : s);
+const stamp = (): string => new Date().toISOString().replace(/\.\d+Z$/, "").replace(/[-:]/g, "").replace("T", "-");
+const clip = (s: string, n = 1400): string => (s.length > n ? s.slice(0, n) + "\n..." : s);
 
 /** The model says it cannot do the task: `SPEC_GAP: ...` / `BLOCKED: ...` at the start of a line. */
 export const GAP_RE = /^\s*(?:SPEC_GAP|BLOCKED)\s*:\s*(.+)$/m;
 
-const lines = (v) => (Array.isArray(v) ? v : v ? [v] : []).map((x) => clip(String(x), 160)).slice(0, 5);
+const lines = (v: unknown): string[] => (Array.isArray(v) ? v : v ? [v] : []).map((x) => clip(String(x), 160)).slice(0, 5);
+
+/** Entries of a model-supplied list that are objects; anything else is ignored rather than trusted. */
+const records = (v: unknown): Record<string, unknown>[] => (Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null) : []);
 
 /** The small "what it did / what it couldn't" block returned to Claude: the model's own account plus the harness's repair log. */
-export function report(res) {
+export function report(res: Pick<ExecResult, "summary" | "repairs"> | null | undefined): Record<string, unknown> | null {
   const s = res?.summary;
   const repairs = (res?.repairs || []).map((r) => r.why);
   if (!s && !repairs.length) return null;
@@ -24,9 +30,9 @@ export function report(res) {
  * Self-check run inside the job when the model says it is finished. Returning a problem sends it
  * back to the model (see runAgent) instead of failing the job and costing Claude a round trip.
  */
-export function makeVerifier(mode, task) {
+export function makeVerifier(mode: string, task: Task | null | undefined): ((text: string) => Promise<VerifyProblem | null>) | null {
   if (mode === "text") return null;
-  return async (text) => {
+  return async (text: string): Promise<VerifyProblem | null> => {
     if (GAP_RE.test(text)) return null; // an honest "can't" is not repaired
     const summary = parseSummary(text);
     if (mode === "review") {
@@ -55,11 +61,11 @@ export function makeVerifier(mode, task) {
 }
 
 /** `npm test` / `npm run x` must exist in package.json; other commands are not second-guessed. */
-function testCommandProblem(cmd) {
+function testCommandProblem(cmd: string): string | null {
   const m = /^npm\s+(?:run\s+(\S+)|(test))\b/.exec(cmd.trim());
   if (!m) return null;
   try {
-    const scripts = JSON.parse(fs.readFileSync(path.join(CFG.repo, "package.json"), "utf8")).scripts || {};
+    const scripts = (JSON.parse(fs.readFileSync(path.join(CFG.repo, "package.json"), "utf8")) as { scripts?: Record<string, unknown> }).scripts || {};
     const name = m[1] || "test";
     return scripts[name] ? null : `test_command uses npm script "${name}" which package.json does not define`;
   } catch {
@@ -68,8 +74,8 @@ function testCommandProblem(cmd) {
 }
 
 /** spec / plan / tasks: docs only, judged by artifact shape. */
-function docGate(job, res) {
-  const reasons = [];
+function docGate(job: Job, res: ExecResult | null): JobResult {
+  const reasons: string[] = [];
   if (!res) reasons.push("no result from the model");
   else {
     if (res.isError) reasons.push(`model error: ${res.error}`);
@@ -88,23 +94,24 @@ function docGate(job, res) {
   if (outside.length) reasons.push(`touched files outside specs/: ${outside.map((c) => c.file).slice(0, 5).join(", ")}`);
   if (!fresh.length) reasons.push("no files were written");
 
-  let artifact = null;
+  let artifact: string | null = null;
   let preview = "";
-  const missing = [];
+  const missing: string[] = [];
 
   if (job.mode === "doc" && job.artifact === "tasks/") {
     const made = fresh.filter((c) => /(^|\/)tasks\/\d+[^/]*\.md$/.test(toPosix(c.file)));
     if (!made.length) reasons.push("no tasks/NN-*.md files were created");
-    const parsed = [];
+    const parsed: Task[] = [];
     for (const m of made) {
       let txt = "";
-      let t;
+      let t: Task | undefined;
       try {
         txt = fs.readFileSync(path.join(CFG.repo, m.file), "utf8");
         t = readTask(m.file);
       } catch {
         continue;
       }
+      if (!t) continue;
       parsed.push(t);
       for (const prob of scopeProblems(t.allowedPaths)) reasons.push(`${m.file}: ${prob}`);
       if (!t.testCommand) reasons.push(`${m.file}: missing test_command frontmatter`);
@@ -140,7 +147,7 @@ function docGate(job, res) {
 }
 
 /** impl / fix / test: code, judged by the repo itself. */
-async function codeGate(job, res) {
+async function codeGate(job: Job, res: ExecResult | null): Promise<JobResult> {
   const task = readTask(job.targetRel);
   const scope = scopeFor(job.role, task);
   const files = diffFilesBetween(job.startedSha);
@@ -149,9 +156,9 @@ async function codeGate(job, res) {
   const before = new Set(Object.keys(job.startedChanges || {}));
   const outside = changedFiles().filter((c) => !before.has(c.file) && !matchAny(c.file, scope));
   const badCommitted = files.filter((f) => !matchAny(f, scope) || isDeniedWrite(f, { denySpecs: true }));
-  const tests = task.testCommand ? await runCmd(task.testCommand) : { pass: false, out: "(no test_command declared)" };
+  const tests: { pass: boolean; out: string } = task.testCommand ? await runCmd(task.testCommand) : { pass: false, out: "(no test_command declared)" };
 
-  const reasons = [];
+  const reasons: string[] = [];
   if (!res) reasons.push("no result from the model");
   else {
     if (res.isError) reasons.push(`model error: ${res.error}`);
@@ -205,17 +212,17 @@ async function codeGate(job, res) {
 }
 
 /** review: judged by a machine-readable verdict, which the server re-derives rather than trusts. */
-function reviewGate(job, res) {
+function reviewGate(job: Job, res: ExecResult | null): JobResult {
   const s = res?.summary;
   if (!s || typeof s.verdict !== "string") {
     const why = res?.gap ? `model reported BLOCKED: ${res.gap}` : s ? "review JSON has no verdict" : `no parsable review JSON${res?.error ? `: ${res.error}` : ""}`;
     return { status: "failed", infra: Boolean(res?.isError), reasons: [why], report: report(res), final_text_path: `specs/.jobs/${job.jobId}.final.txt` };
   }
-  const findings = Array.isArray(s.findings) ? s.findings : [];
-  const criteria = Array.isArray(s.criteria) ? s.criteria : [];
+  const findings = records(s.findings);
+  const criteria = records(s.criteria);
   const blockers = findings.filter((f) => f.severity === "blocker");
   const majors = findings.filter((f) => f.severity === "major");
-  const unmet = criteria.filter((c) => c.status !== "met").map((c) => c.id);
+  const unmet = criteria.filter((c) => c.status !== "met").map((c) => String(c.id));
 
   // The prompt says PASS needs every criterion met and zero blockers; enforce it here.
   let verdict = String(s.verdict).toUpperCase();
@@ -229,13 +236,13 @@ function reviewGate(job, res) {
 
   // "No evidence, no finding": flag findings that point at files outside the diff.
   const inDiff = new Set(diffFilesAgainst(CFG.baseRef || "HEAD").map(normRel));
-  const unverified = inDiff.size ? findings.filter((f) => !f.file || !inDiff.has(normRel(f.file))).map((f) => f.id ?? "?") : [];
+  const unverified = inDiff.size ? findings.filter((f) => !f.file || !inDiff.has(normRel(String(f.file)))).map((f) => f.id ?? "?") : [];
 
   const out = path.join(CFG.specs, "review", `${job.role}-${stamp()}.md`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(
     out,
-    `# ${job.role} review - ${job.targetRel}\n\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\`\n\n## Reviewer notes\n\n${res.result}\n`
+    `# ${job.role} review - ${job.targetRel}\n\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\`\n\n## Reviewer notes\n\n${res?.result ?? ""}\n`
   );
   return {
     status: "done",
@@ -255,8 +262,8 @@ function reviewGate(job, res) {
 }
 
 /** ask: judged by "did it actually answer". */
-function textGate(job, res) {
-  const reasons = [];
+function textGate(_job: Job, res: ExecResult | null): JobResult {
+  const reasons: string[] = [];
   if (!res) reasons.push("no result from the model");
   else {
     if (res.isError) reasons.push(`model error: ${res.error}`);
@@ -265,8 +272,8 @@ function textGate(job, res) {
   return { status: reasons.length ? "failed" : "done", reasons, infra: Boolean(res?.isError), answer: clip(res?.result || "", 3000) };
 }
 
-export async function gate(job, res) {
-  const byMode = { doc: docGate, code: codeGate, review: reviewGate, text: textGate };
+export async function gate(job: Job, res: ExecResult | null): Promise<JobResult> {
+  const byMode: Record<string, (job: Job, res: ExecResult | null) => JobResult | Promise<JobResult>> = { doc: docGate, code: codeGate, review: reviewGate, text: textGate };
   const fn = byMode[job.mode];
   if (!fn) return { status: "failed", reasons: [`no gate for mode "${job.mode}"`] };
   return { ...(await fn(job, res)), role: job.role };

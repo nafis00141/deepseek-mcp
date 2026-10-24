@@ -1,26 +1,28 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { CFG } from "./config.js";
+import { CFG } from "./config.ts";
+import type { ChangedFile, GitResult, Job, Summary } from "./types.ts";
 
 export const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "coverage", ".venv", "__pycache__", ".cache"]);
 
-export const toPosix = (p) => String(p).replace(/\\/g, "/");
-export const rel = (p) => toPosix(path.relative(CFG.repo, p));
+export const toPosix = (p: string): string => String(p).replace(/\\/g, "/");
+export const rel = (p: string): string => toPosix(path.relative(CFG.repo, p));
 
 /** Run git. Output is trimmed unless `raw` (needed for `status -z`, where leading spaces are data). */
-export function git(args, { raw = false } = {}) {
+export function git(args: string[], { raw = false }: { raw?: boolean } = {}): GitResult {
   try {
     const out = execFileSync(CFG.git, args, { cwd: CFG.repo, encoding: "utf8", timeout: 60000, maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
     return { ok: true, out: raw ? String(out) : String(out).trim() };
   } catch (e) {
-    return { ok: false, out: `${e.stdout || ""}\n${e.stderr || ""}`.trim() };
+    const err = e as { stdout?: string | Buffer; stderr?: string | Buffer };
+    return { ok: false, out: `${err.stdout || ""}\n${err.stderr || ""}`.trim() };
   }
 }
 
 /** Environment for model-controlled commands: no API keys or tokens. */
-export function childEnv() {
-  const e = { ...process.env };
+export function childEnv(): NodeJS.ProcessEnv {
+  const e: NodeJS.ProcessEnv = { ...process.env };
   for (const k of Object.keys(e)) if (/^DEEPSEEK_/i.test(k) || /(API_KEY|SECRET|TOKEN)$/i.test(k)) delete e[k];
   // Claude Desktop does not run fnm/nvm shell hooks, so a bare `node` or `npm` in a test command can
   // resolve to an old install. Put the Node that runs this server first, so tests use the same one.
@@ -33,23 +35,23 @@ export function childEnv() {
 }
 
 /** Async so a long test run never freezes the MCP server; kills the whole process tree on timeout. */
-export function runCmd(command, timeoutMs = 600000) {
+export function runCmd(command: string, timeoutMs = 600000): Promise<{ pass: boolean; out: string }> {
   return new Promise((resolve) => {
     let out = "";
     let done = false;
     let timedOut = false;
     const win = process.platform === "win32";
     const child = spawn(command, { cwd: CFG.repo, shell: true, env: childEnv(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: !win });
-    const add = (d) => {
+    const add = (d: Buffer | string): void => {
       out += d;
       if (out.length > 2_000_000) out = out.slice(-1_000_000);
     };
     child.stdout.on("data", add);
     child.stderr.on("data", add);
-    const kill = () => {
+    const kill = (): void => {
       try {
         if (win) spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
-        else process.kill(-child.pid, "SIGKILL");
+        else if (child.pid) process.kill(-child.pid, "SIGKILL");
       } catch {
         /* already gone */
       }
@@ -58,7 +60,7 @@ export function runCmd(command, timeoutMs = 600000) {
       timedOut = true;
       kill();
     }, timeoutMs);
-    const finish = (pass, extra = "") => {
+    const finish = (pass: boolean, extra = ""): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
@@ -70,15 +72,15 @@ export function runCmd(command, timeoutMs = 600000) {
 }
 
 /** Every change in the tree (untracked files listed individually), minus our own bookkeeping. */
-export function changedFiles(root) {
+export function changedFiles(root?: string): ChangedFile[] {
   const args = ["status", "--porcelain", "-z", "-uall"];
   if (root) args.push("--", root);
   const r = git(args, { raw: true });
   if (!r.ok) return [];
   const parts = r.out.split("\0");
-  const res = [];
+  const res: ChangedFile[] = [];
   for (let i = 0; i < parts.length; i++) {
-    const e = parts[i];
+    const e = parts[i] as string;
     if (e.length < 4) continue;
     const code = e.slice(0, 2);
     const file = e.slice(3);
@@ -90,8 +92,8 @@ export function changedFiles(root) {
 }
 
 /** file -> "mtime:size" for every changed file; lets a gate tell "touched by this job" from "already dirty". */
-export function snapshot() {
-  const o = {};
+export function snapshot(): Record<string, string> {
+  const o: Record<string, string> = {};
   for (const c of changedFiles()) {
     try {
       const st = fs.statSync(path.join(CFG.repo, c.file));
@@ -107,7 +109,7 @@ export function snapshot() {
  * Line ending the repo mostly uses, sampled from tracked text files. New files follow it,
  * so a CRLF checkout on Windows doesn't get LF-only files (and vice versa).
  */
-export function detectRepoEol() {
+export function detectRepoEol(): "\r\n" | "\n" {
   const files = git(["ls-files"]).out.split(/\r?\n/).filter((f) => /\.(js|mjs|cjs|ts|tsx|jsx|json|md|py|go|rs|java|cs|css|html|yml|yaml|txt)$/i.test(f)).slice(0, 60);
   let crlf = 0;
   let lf = 0;
@@ -125,20 +127,20 @@ export function detectRepoEol() {
   return crlf > lf ? "\r\n" : "\n";
 }
 
-export function commitsBetween(base) {
+export function commitsBetween(base: string): number {
   return Number(git(["rev-list", "--count", `${base}..HEAD`]).out || 0) || 0;
 }
 
-export function diffFilesBetween(base) {
+export function diffFilesBetween(base: string): string[] {
   return git(["diff", "--name-only", `${base}..HEAD`]).out.split(/\r?\n/).filter(Boolean);
 }
 
 /** Files on this branch relative to the merge base with `base` (what a reviewer sees). */
-export function diffFilesAgainst(base) {
+export function diffFilesAgainst(base: string): string[] {
   return git(["diff", "--name-only", `${base}...HEAD`]).out.split(/\r?\n/).filter(Boolean);
 }
 
-export function diffSize(base) {
+export function diffSize(base: string): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
   for (const line of git(["diff", "--numstat", `${base}..HEAD`]).out.split(/\r?\n/)) {
@@ -155,7 +157,7 @@ const DIFF_EXCLUDES = [":(exclude,glob)**/.env", ":(exclude,glob)**/.env.*"];
  * The code a finished job committed (startedSha..endSha), paged so Claude can read and judge it
  * directly. Secrets files are excluded. Doc, review and ask jobs have no code range.
  */
-export function jobDiff(job, offset = 0, chunk = 30000) {
+export function jobDiff(job: Pick<Job, "startedSha" | "endSha">, offset = 0, chunk = 30000): Record<string, unknown> {
   if (!job.startedSha || !job.endSha) return { error: "this job has no committed code range (doc, review and ask jobs write no code)" };
   const range = `${job.startedSha}..${job.endSha}`;
   const files = git(["diff", "--name-only", range, "--", ".", ...DIFF_EXCLUDES]).out.split(/\r?\n/).filter(Boolean);
@@ -176,14 +178,14 @@ export function jobDiff(job, offset = 0, chunk = 30000) {
   };
 }
 
-export function commit(files, message) {
+export function commit(files: string[], message: string): GitResult {
   if (!files.length) return { ok: false, out: "nothing to commit" };
   const add = git(["add", "--", ...files]);
   if (!add.ok) return add;
   return git(["-c", "commit.gpgsign=false", "commit", "-m", message]);
 }
 
-export function detectBaseRef() {
+export function detectBaseRef(): string {
   const pinned = process.env.BASE_REF;
   if (pinned && git(["rev-parse", "--verify", pinned]).ok) return pinned;
   for (const b of ["main", "master"]) {
@@ -193,11 +195,11 @@ export function detectBaseRef() {
   return head.ok ? head.out : "HEAD";
 }
 
-const lc = (s) => (process.platform === "win32" ? s.toLowerCase() : s);
-const inside = (a, root) => lc(a) === lc(root) || lc(a).startsWith(lc(root) + path.sep.toLowerCase());
+const lc = (s: string): string => (process.platform === "win32" ? s.toLowerCase() : s);
+const inside = (a: string, root: string): boolean => lc(a) === lc(root) || lc(a).startsWith(lc(root) + path.sep.toLowerCase());
 
 /** Resolve a model-supplied path; refuse anything outside the repo, including via symlinks. */
-export function resolveInRepo(p) {
+export function resolveInRepo(p: string | undefined): string {
   const root = path.resolve(CFG.repo);
   const abs = path.resolve(root, p || ".");
   if (!inside(abs, root)) throw new Error(`path escapes the repo: ${p}`);
@@ -207,17 +209,17 @@ export function resolveInRepo(p) {
   return abs;
 }
 
-export function parseSummary(text) {
+export function parseSummary(text: string | null | undefined): Summary | null {
   if (!text) return null;
   const fence = /```(?:json)?\s*([\s\S]*?)```/gi;
-  const blocks = [...String(text).matchAll(fence)].map((m) => m[1]);
+  const blocks = [...String(text).matchAll(fence)].map((m) => m[1] as string);
   const candidates = blocks.length ? blocks.reverse() : [String(text)];
   for (const c of candidates) {
     const s = c.indexOf("{");
     const e = c.lastIndexOf("}");
     if (s < 0 || e <= s) continue;
     try {
-      return JSON.parse(c.slice(s, e + 1));
+      return JSON.parse(c.slice(s, e + 1)) as Summary;
     } catch {
       /* try the next block */
     }
@@ -225,7 +227,7 @@ export function parseSummary(text) {
   return null;
 }
 
-export function tail(file, lines = 12) {
+export function tail(file: string, lines = 12): string {
   try {
     return fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).slice(-lines).join("\n");
   } catch {
@@ -236,30 +238,30 @@ export function tail(file, lines = 12) {
 /* ---------------------------------------------------------------- job store */
 
 /** Write-then-rename so a concurrent reader never sees a half-written file. */
-export function writeJob(id, obj) {
+export function writeJob(id: string, obj: Job): void {
   const file = path.join(CFG.jobs, `${id}.json`);
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
   fs.renameSync(tmp, file);
 }
 
-export function readJob(id) {
+export function readJob(id: string): Job | null {
   const p = path.join(CFG.jobs, `${id}.json`);
   if (!fs.existsSync(p)) return null;
   try {
-    return JSON.parse(fs.readFileSync(p, "utf8"));
+    return JSON.parse(fs.readFileSync(p, "utf8")) as Job;
   } catch {
     return null;
   }
 }
 
-export function allJobs() {
+export function allJobs(): Job[] {
   try {
     return fs
       .readdirSync(CFG.jobs)
       .filter((f) => /^[0-9a-f]{8}\.json$/.test(f))
       .map((f) => readJob(f.slice(0, -5)))
-      .filter(Boolean)
+      .filter((j): j is Job => j !== null)
       .sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
   } catch {
     return [];
@@ -273,7 +275,7 @@ export function listJobs(n = 12) {
 }
 
 /** At startup nothing can be running, so any "running" record is a job the previous server died on. */
-export function reapStaleJobs() {
+export function reapStaleJobs(): number {
   let n = 0;
   for (const j of allJobs()) {
     if (j.state !== "running") continue;
@@ -288,7 +290,7 @@ export function reapStaleJobs() {
   return n;
 }
 
-export function appendRunLog(entry) {
+export function appendRunLog(entry: Record<string, unknown>): void {
   try {
     fs.appendFileSync(path.join(CFG.jobs, "run-log.jsonl"), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
   } catch {

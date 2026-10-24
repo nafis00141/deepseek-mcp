@@ -5,7 +5,8 @@
  * Adding a phase = adding an entry. No new tool, no new server code.
  */
 
-import { isTestGlob } from "./taskfile.js";
+import { isTestGlob } from "./taskfile.ts";
+import type { PromptCtx, RoleName, RoleSpec } from "./types.ts";
 
 const COMMON = `You are running inside an automated handoff from another AI agent.
 - Never ask a question. Nobody is reading this as a conversation.
@@ -16,7 +17,7 @@ const COMMON = `You are running inside an automated handoff from another AI agen
 \`\`\`
   status is "done" (everything asked), "partial" (some of it) or "blocked" (none of it). Be literal: do not list work you did not do.`;
 
-const spec = ({ target, instruction }) => `${COMMON}
+const spec = ({ target, instruction }: PromptCtx): string => `${COMMON}
 
 # Role: SPEC AUTHOR
 Write the specification for: ${instruction || target}
@@ -36,7 +37,7 @@ Create ${target}/spec.md with exactly these sections:
 - If the brief is ambiguous, put it under Open questions. Do not invent scope.
 - You may write only inside ${target}/.`;
 
-const plan = ({ target }) => `${COMMON}
+const plan = ({ target }: PromptCtx): string => `${COMMON}
 
 # Role: PLANNER
 Read ${target}/spec.md first, then write ${target}/plan.md.
@@ -54,7 +55,7 @@ Read ${target}/spec.md first, then write ${target}/plan.md.
 - Every touch point must exist in the repository; verify with read_file/grep before listing it.
 - You may write only inside ${target}/.`;
 
-const tasks = ({ target }) => `${COMMON}
+const tasks = ({ target }: PromptCtx): string => `${COMMON}
 
 # Role: TASK GENERATOR
 Read ${target}/spec.md and ${target}/plan.md. Split the work into task files:
@@ -81,7 +82,7 @@ depends_on: [NN]
 - test_command must be a command that already exists in this repo (check package.json).
 - You may write only inside ${target}/.`;
 
-const impl = ({ task, feedback, instruction }) => {
+const impl = ({ task, feedback, instruction }: PromptCtx): string => {
   const scope = task?.allowedPaths?.length ? task.allowedPaths.join(", ") : "(stay strictly inside the task)";
   const fb = feedback
     ? `\n# Review feedback to address\nAddress ONLY blocker and major findings. Ignore minors and scope_creep.\n\n${feedback.slice(0, 8000)}\n`
@@ -104,7 +105,7 @@ ${fb}
    SPEC_GAP: <one line explaining the conflict>`;
 };
 
-const test = ({ task, instruction }) => `${COMMON}
+const test = ({ task, instruction }: PromptCtx): string => `${COMMON}
 
 # Role: TEST AUTHOR
 Write tests only. You may not modify src/ or any production file.
@@ -116,7 +117,7 @@ ${task ? `# Task file: ${task.rel}\n${task.body}\n` : ""}
 3. Run run_tests until green.
 4. Do NOT run git and do NOT commit. The harness commits.`;
 
-const review = ({ target, instruction }) => `${COMMON}
+const review = ({ target, instruction }: PromptCtx): string => `${COMMON}
 
 # Role: READ-ONLY REVIEWER
 You have read_file, list_dir, grep and git_diff. You cannot edit anything.
@@ -144,7 +145,7 @@ ${instruction ? `\n# Extra focus\n${instruction}\n` : ""}
 {"verdict":"PASS","criteria":[{"id":"AC-1","status":"met"}],"findings":[{"id":"F1","severity":"blocker","file":"src/x.ts","line":"42","criterion":"AC-1","issue":"...","fix":"..."}],"scope_creep":[]}
 \`\`\``;
 
-const ask = ({ instruction, target }) => `${COMMON}
+const ask = ({ instruction, target }: PromptCtx): string => `${COMMON}
 
 # Role: READ-ONLY ANALYST
 Question: ${instruction || "Summarize the current state of " + target}
@@ -153,7 +154,7 @@ Question: ${instruction || "Summarize the current state of " + target}
 - read_file / list_dir / grep only. Cite file:line for every claim.
 - Answer in at most 40 lines, then the summary block.`;
 
-export const ROLES = {
+export const ROLES: Record<RoleName, RoleSpec> = {
   spec: { caps: "specs", mode: "doc", artifact: "spec.md", headings: ["## Goal", "## Acceptance criteria"], needsInstruction: true, wait: 120, title: "Write specs/<feature>/spec.md from a brief" },
   plan: { caps: "specs", mode: "doc", artifact: "plan.md", headings: ["## Approach"], wait: 120, title: "Write plan.md from an existing spec" },
   tasks: { caps: "specs", mode: "doc", artifact: "tasks/", requiresTaskFrontmatter: true, wait: 180, title: "Split spec + plan into frontmatter task files" },
@@ -164,10 +165,10 @@ export const ROLES = {
   ask: { caps: "readonly", mode: "text", needsInstruction: true, wait: 90, title: "Read-only question about the repo, answered with citations" },
 };
 
-export const ROLE_NAMES = Object.keys(ROLES);
+export const ROLE_NAMES = Object.keys(ROLES) as RoleName[];
 
-export function buildPrompt(roleName, ctx) {
-  const builders = { spec, plan, tasks, impl, fix: impl, test, review, ask };
+export function buildPrompt(roleName: RoleName, ctx: PromptCtx): string {
+  const builders: Record<RoleName, (c: PromptCtx) => string> = { spec, plan, tasks, impl, fix: impl, test, review, ask };
   const body = builders[roleName](ctx);
   if (!ctx.pack) return body;
   return `${body}

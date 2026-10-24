@@ -9,11 +9,11 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { CFG } from "../src/config.js"; // resolves git the same way the server does
+import { CFG } from "../src/config.ts"; // resolves git the same way the server does
 
-const server = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "server.js");
+const server = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "server.ts");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "dsmcp-smoke-"));
-const git = (...a) => spawnSync(CFG.git, a, { cwd: tmp, encoding: "utf8" });
+const git = (...a: string[]) => spawnSync(CFG.git, a, { cwd: tmp, encoding: "utf8" });
 git("init", "-q");
 fs.writeFileSync(path.join(tmp, "f.txt"), "x\n");
 git("add", ".");
@@ -26,17 +26,22 @@ const child = spawn(process.execPath, [server], {
 
 let stderr = "";
 let buf = "";
-const pending = new Map();
-child.stderr.on("data", (d) => (stderr += d));
-child.stdout.on("data", (d) => {
+interface RpcReply {
+  id: number;
+  result?: unknown;
+  error?: unknown;
+}
+const pending = new Map<number, (m: RpcReply) => void>();
+child.stderr.on("data", (d: Buffer) => (stderr += d));
+child.stdout.on("data", (d: Buffer) => {
   buf += d;
-  let i;
+  let i: number;
   while ((i = buf.indexOf("\n")) >= 0) {
     const line = buf.slice(0, i).trim();
     buf = buf.slice(i + 1);
     if (!line) continue;
     try {
-      const msg = JSON.parse(line);
+      const msg = JSON.parse(line) as RpcReply;
       pending.get(msg.id)?.(msg);
     } catch {
       /* not a JSON-RPC line */
@@ -44,13 +49,13 @@ child.stdout.on("data", (d) => {
   }
 });
 
-const send = (obj) => child.stdin.write(`${JSON.stringify(obj)}\n`);
-const request = (id, method, params) =>
-  new Promise((resolve, reject) => {
+const send = (obj: unknown): void => void child.stdin.write(`${JSON.stringify(obj)}\n`);
+const request = <T = unknown>(id: number, method: string, params: unknown): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`no reply to ${method} within 15s`)), 15000);
     pending.set(id, (m) => {
       clearTimeout(timer);
-      m.error ? reject(new Error(`${method}: ${JSON.stringify(m.error)}`)) : resolve(m.result);
+      m.error ? reject(new Error(`${method}: ${JSON.stringify(m.error)}`)) : resolve(m.result as T);
     });
     send({ jsonrpc: "2.0", id, method, params });
   });
@@ -60,21 +65,26 @@ try {
   await request(1, "initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "smoke", version: "0" } });
   send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
-  const tools = (await request(2, "tools/list", {})).tools.map((t) => t.name);
-  const want = ["version", "roles", "ping", "handoff", "job_status", "jobs"];
+  interface ToolInfo {
+    name: string;
+    inputSchema?: { properties?: Record<string, unknown> };
+  }
+  const tools = (await request<{ tools: ToolInfo[] }>(2, "tools/list", {})).tools.map((t) => t.name);
+  const want = ["version", "roles", "ping", "handoff", "job_status", "job_diff", "discard", "jobs"];
   const missing = want.filter((n) => !tools.includes(n));
   if (missing.length) throw new Error(`missing tools: ${missing.join(", ")} (got: ${tools.join(", ")})`);
 
-  const handoff = (await request(3, "tools/list", {})).tools.find((t) => t.name === "handoff");
+  const handoff = (await request<{ tools: ToolInfo[] }>(3, "tools/list", {})).tools.find((t) => t.name === "handoff");
   const props = Object.keys(handoff?.inputSchema?.properties ?? {});
   if (!props.includes("role") || !props.includes("target")) throw new Error(`handoff schema looks wrong: ${JSON.stringify(props)}`);
 
-  const info = JSON.parse((await request(4, "tools/call", { name: "version", arguments: {} })).content[0].text);
+  const call = await request<{ content: { text: string }[] }>(4, "tools/call", { name: "version", arguments: {} });
+  const info = JSON.parse(call.content[0]?.text ?? "{}") as { keyPresent?: boolean; version?: string; node?: string };
   if (!info.keyPresent) throw new Error("version reports no API key");
   console.log(`ok: ${tools.length} tools (${tools.join(", ")}); handoff args: ${props.join(", ")}; server ${info.version}; node ${info.node}`);
   ok = true;
 } catch (e) {
-  console.error(`SMOKE FAILED: ${e.message}`);
+  console.error(`SMOKE FAILED: ${(e as Error).message}`);
   if (stderr.trim()) console.error(`--- server stderr ---\n${stderr.trim()}`);
 } finally {
   child.kill();

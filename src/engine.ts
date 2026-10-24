@@ -6,9 +6,61 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { CFG } from "./config.js";
-import { SKIP_DIRS, detectRepoEol, git, rel, runCmd, resolveInRepo, toPosix } from "./repo.js";
-import { isDeniedRead, isDeniedWrite, matchAny, scopeFor } from "./taskfile.js";
+import { CFG } from "./config.ts";
+import type { Config } from "./config.ts";
+import { SKIP_DIRS, detectRepoEol, git, rel, runCmd, resolveInRepo, toPosix } from "./repo.ts";
+import { isDeniedRead, isDeniedWrite, matchAny, scopeFor } from "./taskfile.ts";
+import type { Task } from "./taskfile.ts";
+import type { AgentOutput, Caps, Repair, RoleName, RoleSpec, Usage } from "./types.ts";
+
+/* ---------------------------------------------------------------- wire types */
+
+interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+/** One message in the OpenAI-style conversation. `reasoning_content` is DeepSeek's thinking text; it is passed back unchanged. */
+export interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  reasoning_content?: string;
+}
+
+interface ChatResponse {
+  choices?: { message?: ChatMessage; finish_reason?: string }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number; [key: string]: unknown };
+}
+
+export interface ToolSchema {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
+export interface RequestBody {
+  model: string;
+  messages: ChatMessage[];
+  max_tokens: number;
+  thinking: { type: "enabled" | "disabled" };
+  reasoning_effort?: string;
+  temperature?: number;
+  tools?: ToolSchema[];
+  tool_choice?: "auto";
+}
+
+export type RequestCfg = Pick<Config, "model" | "maxTokens" | "thinking" | "effort"> & { temperature?: number };
+
+/** What a tool returns to the model. Errors are data, not exceptions. */
+export type ToolOutput = Record<string, unknown> & { error?: string };
+
+/** Verifier outcome: a problem is sent back to the model as another turn. */
+export interface VerifyProblem {
+  why: string;
+  message: string;
+}
 
 const SYSTEM = `You are a coding agent working inside a repository. You act by calling tools.
 Rules:
@@ -24,18 +76,18 @@ const DIFF_CHUNK = 30000; // chars of diff per git_diff call
 
 /* --------------------------------------------------------------- line endings */
 
-const toLf = (s) => s.replace(/\r\n/g, "\n");
-const withEol = (s, eol) => (eol === "\r\n" ? toLf(s).replace(/\n/g, "\r\n") : toLf(s));
-const eolStats = (txt) => {
+const toLf = (s: string): string => s.replace(/\r\n/g, "\n");
+const withEol = (s: string, eol: string): string => (eol === "\r\n" ? toLf(s).replace(/\n/g, "\r\n") : toLf(s));
+const eolStats = (txt: string): { crlf: number; lf: number } => {
   const crlf = (txt.match(/\r\n/g) || []).length;
   return { crlf, lf: (txt.match(/\n/g) || []).length - crlf };
 };
-let repoEol = null;
-const newFileEol = () => (repoEol ??= detectRepoEol());
+let repoEol: string | null = null;
+const newFileEol = (): string => (repoEol ??= detectRepoEol());
 
 /* --------------------------------------------------------------- capabilities */
 
-export function capsFor(roleName, role, task) {
+export function capsFor(roleName: RoleName, role: RoleSpec, task: Task | null | undefined): Caps {
   if (role.caps === "specs") return { write: ["specs/**"], denySpecs: false, canRunTests: false, baseRef: null };
   if (role.caps === "readonly") return { write: [], denySpecs: true, canRunTests: false, baseRef: CFG.baseRef };
 
@@ -49,7 +101,7 @@ export function capsFor(roleName, role, task) {
   };
 }
 
-function canWrite(file, caps) {
+function canWrite(file: string, caps: Caps): boolean {
   return caps.write.length > 0 && matchAny(file, caps.write) && !isDeniedWrite(file, { denySpecs: caps.denySpecs });
 }
 
@@ -57,12 +109,12 @@ function canWrite(file, caps) {
  * Resolve first, then match: the glob is tested against the path that will actually
  * be written, so `src/../package.json` cannot sneak past `src/**`.
  */
-function checkedWriteTarget(p, caps, verb) {
-  let abs;
+function checkedWriteTarget(p: string, caps: Caps, verb: string): { error: string } | { error?: undefined; file: string; abs: string } {
+  let abs: string;
   try {
     abs = resolveInRepo(p);
   } catch (e) {
-    return { error: `not permitted to ${verb} ${toPosix(p)}: ${e.message}` };
+    return { error: `not permitted to ${verb} ${toPosix(p)}: ${(e as Error).message}` };
   }
   const file = rel(abs);
   if (!canWrite(file, caps)) return { error: `not permitted to ${verb} ${file}; allowed: ${caps.write.join(", ") || "(none)"}` };
@@ -70,6 +122,8 @@ function checkedWriteTarget(p, caps, verb) {
 }
 
 /* --------------------------------------------------------------------- tools */
+
+type ToolRun<A> = (args: A, caps: Caps) => ToolOutput | Promise<ToolOutput>;
 
 const TOOL_DEFS = {
   read_file: {
@@ -83,14 +137,14 @@ const TOOL_DEFS = {
       },
       required: ["path"],
     },
-    run: ({ path: p, start, end }) => {
+    run: (({ path: p, start, end }: { path: string; start?: number; end?: number }) => {
       const abs = resolveInRepo(p);
       if (isDeniedRead(rel(abs))) return { error: `not permitted to read ${toPosix(p)}` };
       const lines = fs.readFileSync(abs, "utf8").split(/\r?\n/);
       const a = Math.max(1, start || 1);
       const last = Math.min(lines.length, end || a + 399, a + 399);
       // Stop at a character budget so the tool result is never cut mid-line by the transport.
-      const out = [];
+      const out: string[] = [];
       let size = 0;
       let b = a - 1;
       for (let i = a; i <= last; i++) {
@@ -101,19 +155,19 @@ const TOOL_DEFS = {
         b = i;
       }
       return { path: toPosix(p), total_lines: lines.length, from: a, to: b, content: out.join("\n"), more: b < lines.length ? `call again with start=${b + 1}` : undefined };
-    },
+    }) as ToolRun<{ path: string; start?: number; end?: number }>,
   },
   list_dir: {
     description: "List a directory (names only, no recursion).",
     parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-    run: ({ path: p }) => {
+    run: (({ path: p }: { path?: string }) => {
       const abs = resolveInRepo(p || ".");
       const entries = fs.readdirSync(abs, { withFileTypes: true })
         .filter((e) => !SKIP_DIRS.has(e.name) && !isDeniedRead(e.name))
         .slice(0, 300)
         .map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
       return { path: toPosix(p || "."), entries };
-    },
+    }) as ToolRun<{ path?: string }>,
   },
   grep: {
     description: "Regex search across the repo. Returns file:line: text. Skips build and dependency dirs.",
@@ -126,13 +180,13 @@ const TOOL_DEFS = {
       },
       required: ["pattern"],
     },
-    run: ({ pattern, path: p, max }) => {
+    run: (({ pattern, path: p, max }: { pattern: string; path?: string; max?: number }) => {
       const root = resolveInRepo(p || ".");
       if (String(pattern).length > 200) return { error: "pattern too long (max 200 chars)" };
       const re = new RegExp(pattern, "i");
-      const hits = [];
+      const hits: string[] = [];
       const limit = Math.min(max || 50, 200);
-      const walk = (dir) => {
+      const walk = (dir: string): void => {
         if (hits.length >= limit) return;
         for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
           if (hits.length >= limit) return;
@@ -144,7 +198,8 @@ const TOOL_DEFS = {
               if (fs.statSync(abs).size > 1_000_000) continue;
               const lines = fs.readFileSync(abs, "utf8").split(/\r?\n/);
               for (let i = 0; i < lines.length && hits.length < limit; i++) {
-                if (lines[i].length < 2000 && re.test(lines[i])) hits.push(`${toPosix(path.relative(CFG.repo, abs))}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
+                const line = lines[i] as string;
+                if (line.length < 2000 && re.test(line)) hits.push(`${toPosix(path.relative(CFG.repo, abs))}:${i + 1}: ${line.trim().slice(0, 200)}`);
               }
             } catch {
               /* binary or unreadable */
@@ -154,7 +209,7 @@ const TOOL_DEFS = {
       };
       walk(root);
       return { matches: hits, count: hits.length, truncated: hits.length >= limit };
-    },
+    }) as ToolRun<{ pattern: string; path?: string; max?: number }>,
   },
   write_file: {
     description: "Create or overwrite a file. Parent directories are created.",
@@ -163,9 +218,9 @@ const TOOL_DEFS = {
       properties: { path: { type: "string" }, content: { type: "string" } },
       required: ["path", "content"],
     },
-    run: ({ path: p, content }, caps) => {
+    run: (({ path: p, content }: { path: string; content?: string }, caps: Caps) => {
       const target = checkedWriteTarget(p, caps, "write");
-      if (target.error) return target;
+      if (target.error !== undefined) return { error: target.error };
       const { file, abs } = target;
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       // Keep the file's own line endings (or the repo's, for a new file); leave mixed files untouched.
@@ -176,7 +231,7 @@ const TOOL_DEFS = {
       } else data = withEol(data, newFileEol());
       fs.writeFileSync(abs, data);
       return { written: file, bytes: Buffer.byteLength(data) };
-    },
+    }) as ToolRun<{ path: string; content?: string }>,
   },
   edit_file: {
     description: "Replace an exact string in a file. `old` must occur exactly once.",
@@ -185,9 +240,9 @@ const TOOL_DEFS = {
       properties: { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } },
       required: ["path", "old", "new"],
     },
-    run: ({ path: p, old, new: neu }, caps) => {
+    run: (({ path: p, old, new: neu }: { path: string; old: string; new: string }, caps: Caps) => {
       const target = checkedWriteTarget(p, caps, "edit");
-      if (target.error) return target;
+      if (target.error !== undefined) return { error: target.error };
       const { file, abs } = target;
       if (!old) return { error: "`old` must not be empty" };
       const txt = fs.readFileSync(abs, "utf8");
@@ -202,16 +257,16 @@ const TOOL_DEFS = {
       if (!mixed) out = withEol(out, crlf > lf ? "\r\n" : "\n");
       fs.writeFileSync(abs, out);
       return { edited: file, bytes: Buffer.byteLength(out) };
-    },
+    }) as ToolRun<{ path: string; old: string; new: string }>,
   },
   run_tests: {
     description: "Run the task's declared test command and return the tail of its output.",
     parameters: { type: "object", properties: {} },
-    run: async (_args, caps) => {
-      if (!caps.canRunTests) return { error: "no test command is available for this role" };
+    run: (async (_args: Record<string, never>, caps: Caps) => {
+      if (!caps.canRunTests || !caps.testCommand) return { error: "no test command is available for this role" };
       const r = await runCmd(caps.testCommand);
       return { pass: r.pass, command: caps.testCommand, output: r.out.split(/\r?\n/).slice(-60).join("\n") };
-    },
+    }) as ToolRun<Record<string, never>>,
   },
   git_diff: {
     description: "Show the committed diff of this branch against the base branch, plus a stat summary.",
@@ -223,7 +278,7 @@ const TOOL_DEFS = {
       },
       required: [],
     },
-    run: ({ base, offset }, caps) => {
+    run: (({ base, offset }: { base?: string; offset?: number }, caps: Caps) => {
       const ref = base || caps.baseRef || "main";
       const stat = git(["diff", "--stat", `${ref}...HEAD`]);
       const full = git(["diff", `${ref}...HEAD`]);
@@ -238,54 +293,56 @@ const TOOL_DEFS = {
         next_offset: end < full.out.length ? end : null,
         hint: stat.ok ? undefined : "diff failed - try base 'master', or read files directly",
       };
-    },
+    }) as ToolRun<{ base?: string; offset?: number }>,
   },
 };
 
-const SAFE_FS_TOOLS = new Set(["read_file", "list_dir", "grep"]);
+type ToolName = keyof typeof TOOL_DEFS;
+const isToolName = (n: string): n is ToolName => Object.hasOwn(TOOL_DEFS, n);
 
-function toolSchema(name, caps) {
+function toolSchema(name: ToolName): ToolSchema {
   const def = TOOL_DEFS[name];
   return { type: "function", function: { name, description: def.description, parameters: def.parameters } };
 }
 
-function availableTools(caps) {
-  const names = new Set([...SAFE_FS_TOOLS]);
+function availableTools(caps: Caps): ToolSchema[] {
+  const names = new Set<ToolName>(["read_file", "list_dir", "grep"]);
   if (caps.write.length) {
     names.add("write_file");
     names.add("edit_file");
   }
   if (caps.canRunTests) names.add("run_tests");
   if (caps.baseRef) names.add("git_diff");
-  return [...names].map((n) => toolSchema(n, caps));
+  return [...names].map((n) => toolSchema(n));
 }
 
 /** Keep a tool result as valid JSON under the limit, instead of slicing it mid-string. */
-export function packResult(out, limit = RESULT_LIMIT) {
+export function packResult(out: unknown, limit = RESULT_LIMIT): string {
   const s = JSON.stringify(out);
   if (s.length <= limit) return s;
   return JSON.stringify({ error: `result too large (${s.length} chars); narrow the request or page it`, preview: s.slice(0, limit - 300) });
 }
 
-export async function executeTool(name, args, caps) {
+export async function executeTool(name: string, args: Record<string, unknown> | null | undefined, caps: Caps): Promise<ToolOutput> {
+  if (!isToolName(name)) return { error: `unknown tool: ${name}` };
   const def = TOOL_DEFS[name];
-  if (!def) return { error: `unknown tool: ${name}` };
   if (name === "write_file" || name === "edit_file") {
     if (!caps.write.length) return { error: "this role is read-only" };
   }
   if (name === "run_tests" && !caps.canRunTests) return { error: "no test command for this role" };
   try {
-    return await def.run(args || {}, caps);
+    // Tool arguments are untrusted JSON from the model: every tool re-checks what it uses, so one cast here is the boundary.
+    return await (def.run as ToolRun<Record<string, unknown>>)(args || {}, caps);
   } catch (e) {
-    return { error: e.message };
+    return { error: (e as Error).message };
   }
 }
 
 /* ---------------------------------------------------------------------- loop */
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function post(url, headers, body, timeoutMs, signal) {
+async function post(url: string, headers: Record<string, string>, body: string, timeoutMs: number, signal?: AbortSignal): Promise<{ status: number; text: string }> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error(`request timed out after ${timeoutMs}ms`)), timeoutMs);
   const onAbort = () => ctrl.abort(new Error("aborted"));
@@ -303,13 +360,11 @@ async function post(url, headers, body, timeoutMs, signal) {
  * The request body. Thinking mode is explicit either way; sampling temperature is only sent when thinking
  * is off (it has no effect while thinking), and reasoning_effort only while it is on.
  */
-export function requestBody(messages, tools, cfg = CFG) {
-  const body = { model: cfg.model, messages, max_tokens: cfg.maxTokens };
+export function requestBody(messages: ChatMessage[], tools: ToolSchema[], cfg: RequestCfg = CFG): RequestBody {
+  const body: RequestBody = { model: cfg.model, messages, max_tokens: cfg.maxTokens, thinking: { type: cfg.thinking } };
   if (cfg.thinking === "enabled") {
-    body.thinking = { type: "enabled" };
     body.reasoning_effort = cfg.effort;
-  } else {
-    body.thinking = { type: "disabled" };
+  } else if (cfg.temperature !== undefined) {
     body.temperature = cfg.temperature;
   }
   if (tools.length) {
@@ -319,9 +374,9 @@ export function requestBody(messages, tools, cfg = CFG) {
   return body;
 }
 
-async function chat(messages, tools, signal) {
+async function chat(messages: ChatMessage[], tools: ToolSchema[], signal?: AbortSignal): Promise<ChatResponse> {
   const body = requestBody(messages, tools);
-  const headers = { "content-type": "application/json", authorization: `Bearer ${CFG.key}` };
+  const headers: Record<string, string> = { "content-type": "application/json", authorization: `Bearer ${CFG.key}` };
   const payload = JSON.stringify(body);
 
   const attempts = 4;
@@ -330,13 +385,13 @@ async function chat(messages, tools, signal) {
     try {
       const res = await post(`${CFG.baseUrl}/chat/completions`, headers, payload, CFG.requestTimeoutMs, signal);
       if (res.status < 200 || res.status >= 300) {
-        const err = new Error(`DeepSeek HTTP ${res.status}: ${res.text.slice(0, 500)}`);
+        const err: Error & { retryable?: boolean } = new Error(`DeepSeek HTTP ${res.status}: ${res.text.slice(0, 500)}`);
         err.retryable = res.status === 429 || res.status >= 500;
         throw err;
       }
-      return JSON.parse(res.text);
+      return JSON.parse(res.text) as ChatResponse;
     } catch (e) {
-      const retryable = !signal?.aborted && e.retryable !== false && !(e instanceof SyntaxError);
+      const retryable = !signal?.aborted && (e as { retryable?: boolean }).retryable !== false && !(e instanceof SyntaxError);
       if (attempt >= attempts || !retryable) throw e;
       await sleep(2000 * 2 ** (attempt - 1)); // 2s, 4s, 8s
     }
@@ -344,11 +399,11 @@ async function chat(messages, tools, signal) {
   throw new Error("unreachable");
 }
 
-function compact(messages, budget = 220000) {
+function compact(messages: ChatMessage[], budget = 220000): ChatMessage[] {
   let size = JSON.stringify(messages).length;
   if (size <= budget) return messages;
   for (let i = 2; i < messages.length - 6 && size > budget; i++) {
-    const m = messages[i];
+    const m = messages[i] as ChatMessage;
     if (m.role === "tool" && typeof m.content === "string" && m.content.length > 3000) {
       const cut = m.content.length - 3000;
       m.content = m.content.slice(0, 3000) + `\n[truncated ${cut} chars]`;
@@ -358,7 +413,7 @@ function compact(messages, budget = 220000) {
   return messages;
 }
 
-export async function ping() {
+export async function ping(): Promise<{ reply: string; usage: ChatResponse["usage"] | null }> {
   const data = await chat([{ role: "user", content: "Reply with exactly: PONG" }], []);
   return { reply: data.choices?.[0]?.message?.content ?? "", usage: data.usage ?? null };
 }
@@ -368,16 +423,23 @@ export async function ping() {
  * { why, message }: the message goes back to the model as a new user turn - at most
  * CFG.maxRepairs times - so cheap self-checks happen here rather than as a round trip to Claude.
  */
-export async function runAgent({ prompt, caps, logPath, onProgress, signal, verify }) {
+export async function runAgent({ prompt, caps, logPath, onProgress, signal, verify }: {
+  prompt: string;
+  caps: Caps;
+  logPath: string;
+  onProgress?: (message: string) => void;
+  signal?: AbortSignal;
+  verify?: ((text: string) => Promise<VerifyProblem | null>) | null;
+}): Promise<AgentOutput> {
   const tools = availableTools(caps);
-  const messages = [
+  const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM },
     { role: "user", content: prompt },
   ];
-  const usage = { input: 0, output: 0 };
-  const repairs = [];
+  const usage: Usage = { input: 0, output: 0 };
+  const repairs: Repair[] = [];
   let turns = 0;
-  const logLine = (s) => {
+  const logLine = (s: string): void => {
     try {
       fs.appendFileSync(logPath, `${new Date().toISOString()} ${s}\n`);
     } catch {
@@ -396,7 +458,7 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
     messages.push(msg);
 
     const calls = msg.tool_calls || [];
-    if (calls.length && data.choices[0].finish_reason === "length") {
+    if (calls.length && data.choices?.[0]?.finish_reason === "length") {
       // The reply hit max_tokens mid tool call, so the arguments are cut off: do not run them.
       logLine(`turn ${turns}: reply truncated at max_tokens mid tool call`);
       for (const call of calls) messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "your reply was cut off before this call was complete, so it was not run; repeat it with less text in one call" }) });

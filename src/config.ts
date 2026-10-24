@@ -23,7 +23,7 @@ try {
 const env = process.env;
 const baseUrl = (env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/+$/, "");
 
-const isFile = (p) => {
+const isFile = (p: string): boolean => {
   try {
     return fs.statSync(p).isFile();
   } catch {
@@ -35,7 +35,7 @@ const isFile = (p) => {
  * Git is often installed but not on PATH - GUI apps, SourceTree's bundled copy,
  * portable installs. Resolve it once, so the gates never depend on PATH.
  */
-function discoverGit() {
+function discoverGit(): string {
   if (env.GIT_BIN && isFile(env.GIT_BIN)) return env.GIT_BIN;
   const local = env.LOCALAPPDATA || "";
   const pf = env.ProgramFiles || "C:\\Program Files";
@@ -62,17 +62,42 @@ function discoverGit() {
   return "git";
 }
 
-const pick = (v, allowed, dflt, name) => {
+function pick<T extends string>(v: string | undefined, allowed: readonly T[], dflt: T, name: string): T {
   const x = String(v ?? "").trim().toLowerCase();
   if (!x) return dflt;
-  if (allowed.includes(x)) return x;
+  const hit = allowed.find((a) => a === x);
+  if (hit) return hit;
   console.error(`[handoff] ${name}="${v}" is not one of ${allowed.join("/")}; using ${dflt}`);
   return dflt;
-};
-const thinking = pick(env.DEEPSEEK_THINKING, ["enabled", "disabled"], "enabled", "DEEPSEEK_THINKING");
-const effort = pick(env.DEEPSEEK_EFFORT, ["low", "high", "max"], "high", "DEEPSEEK_EFFORT");
+}
+const thinking = pick(env.DEEPSEEK_THINKING, ["enabled", "disabled"] as const, "enabled", "DEEPSEEK_THINKING");
+const effort = pick(env.DEEPSEEK_EFFORT, ["low", "high", "max"] as const, "high", "DEEPSEEK_EFFORT");
 
-export const CFG = {
+export interface Config {
+  root: string;
+  repo: string;
+  git: string;
+  key: string;
+  baseUrl: string;
+  model: string;
+  maxTurns: number;
+  timeoutMs: number;
+  requestTimeoutMs: number;
+  diffCap: number;
+  temperature: number;
+  thinking: "enabled" | "disabled";
+  effort: "low" | "high" | "max";
+  maxTokens: number;
+  baseRef: string | null;
+  maxWaitS: number;
+  maxRepairs: number;
+  contextChars: number;
+  maxFixRounds: number;
+  specs: string;
+  jobs: string;
+}
+
+export const CFG: Config = {
   root: ROOT,
   repo: path.resolve(env.REPO_ROOT || process.cwd()),
   git: discoverGit(),
@@ -93,6 +118,8 @@ export const CFG = {
   maxRepairs: Number(env.MAX_REPAIRS ?? 2), // in-job repair attempts after a failed self-check, before the gate judges
   contextChars: Number(env.CONTEXT_CHARS ?? 6000), // size of the context pack added to every prompt; 0 disables it
   maxFixRounds: Number(env.MAX_FIX_ROUNDS || 2), // fix rounds per task before escalating to the human
+  specs: "",
+  jobs: "",
 };
 
 CFG.specs = path.join(CFG.repo, "specs");

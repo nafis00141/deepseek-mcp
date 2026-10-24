@@ -1,27 +1,38 @@
 import fs from "node:fs";
 import path from "node:path";
-import { CFG } from "./config.js";
+import { CFG } from "./config.ts";
 
 /** Keys whose value is a list. Everything else is kept as one raw string. */
 const LIST_KEYS = new Set(["allowed_paths", "depends_on"]);
 
-const unquote = (s) => s.trim().replace(/^["']|["']$/g, "");
+const unquote = (s: string): string => s.trim().replace(/^["']|["']$/g, "");
 
 /**
  * Parse a task file. Frontmatter is intentionally dumb: `key: value` or
  * `key: [a, b]`. List keys (allowed_paths, depends_on) are split on commas;
  * every other key - notably test_command - is kept verbatim, commas included.
  */
-export function readTask(file) {
+export interface Task {
+  path: string;
+  rel: string;
+  id: string;
+  allowedPaths: string[];
+  dependsOn: string[];
+  testCommand: string;
+  body: string;
+}
+
+export function readTask(file: string): Task {
   const abs = path.isAbsolute(file) ? file : path.resolve(CFG.repo, file);
   const raw = fs.readFileSync(abs, "utf8");
   const split = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(raw);
-  const fm = {};
+  const fm: Record<string, string[]> = {};
   if (split) {
-    for (const line of split[1].split(/\r?\n/)) {
+    for (const line of (split[1] as string).split(/\r?\n/)) {
       const kv = /^([a-z_]+):\s*(.*)$/.exec(line.trim());
       if (!kv) continue;
-      const [, key, val] = kv;
+      const key = kv[1] as string;
+      const val = kv[2] as string;
       fm[key] = LIST_KEYS.has(key)
         ? val.replace(/^\[|\]$/g, "").split(",").map(unquote).filter(Boolean)
         : [unquote(val)].filter(Boolean);
@@ -30,25 +41,25 @@ export function readTask(file) {
   return {
     path: abs,
     rel: path.relative(CFG.repo, abs).replace(/\\/g, "/"),
-    id: (fm.id && fm.id[0]) || path.basename(abs, ".md"),
+    id: fm.id?.[0] || path.basename(abs, ".md"),
     allowedPaths: fm.allowed_paths || [],
     dependsOn: fm.depends_on || [],
-    testCommand: (fm.test_command && fm.test_command[0]) || "",
-    body: (split ? split[2] : raw).trim(),
+    testCommand: fm.test_command?.[0] || "",
+    body: (split ? (split[2] as string) : raw).trim(),
   };
 }
 
 /* ------------------------------------------------------------------- paths */
 
 /** Repo-relative, forward-slash, no leading ./ or duplicate slashes. */
-export function normRel(p) {
+export function normRel(p: string): string {
   return path.posix.normalize(String(p).replace(/\\/g, "/")).replace(/^(\.\/)+/, "").replace(/\/+$/, "");
 }
 
 const CI = process.platform === "win32" ? "i" : "";
-const cache = new Map();
+const cache = new Map<string, RegExp>();
 
-function globToRe(g) {
+function globToRe(g: string): RegExp {
   const s = String(g).replace(/\\/g, "/").replace(/^\.\//, "");
   let re = "";
   for (let i = 0; i < s.length; i++) {
@@ -70,7 +81,7 @@ function globToRe(g) {
 }
 
 /** Glob match for `src/auth/**` style patterns. Empty list means unrestricted. */
-export function matchAny(file, globs) {
+export function matchAny(file: string, globs: readonly string[]): boolean {
   if (!globs.length) return true;
   const f = normRel(file);
   return globs.some((g) => {
@@ -93,14 +104,14 @@ const DENY_WRITE = [
 ];
 
 /** `denySpecs`: code roles may not touch specs/ either. */
-export function isDeniedWrite(file, { denySpecs = false } = {}) {
+export function isDeniedWrite(file: string, { denySpecs = false }: { denySpecs?: boolean } = {}): boolean {
   const f = normRel(file);
   if (DENY_WRITE.some((re) => re.test(f))) return true;
   return denySpecs && /^specs(\/|$)/i.test(f);
 }
 
 /** Never readable by the model: secrets and git internals. */
-export function isDeniedRead(file) {
+export function isDeniedRead(file: string): boolean {
   const f = normRel(file);
   if (/^\.git(\/|$)/i.test(f)) return true;
   if (/(^|\/)\.env\.example$/i.test(f)) return false;
@@ -110,27 +121,27 @@ export function isDeniedRead(file) {
 /* ------------------------------------------------------------ scope rules */
 
 /** A glob that names a test location (tests/**, test/**, **\/*.test.ts, ...). specs/ is NOT a test path. */
-export const isTestGlob = (g) => /(^|\/)(tests?|__tests__)(\/|$)|\.(test|spec)\b/i.test(String(g).replace(/\\/g, "/"));
+export const isTestGlob = (g: string): boolean => /(^|\/)(tests?|__tests__)(\/|$)|\.(test|spec)\b/i.test(String(g).replace(/\\/g, "/"));
 
 /** The globs a role may actually write. The `test` role is narrowed to test globs and fails closed. */
-export function scopeFor(roleName, task) {
+export function scopeFor(roleName: string, task: Pick<Task, "allowedPaths"> | null | undefined): string[] {
   const all = task?.allowedPaths ?? [];
   return roleName === "test" ? all.filter(isTestGlob) : all;
 }
 
-const staticPrefix = (g) => normRel(g).split(/[*?]/)[0];
+const staticPrefix = (g: string): string => normRel(g).split(/[*?]/)[0] ?? "";
 
 /** Heuristic: do two globs claim overlapping territory? Compares literal prefixes. */
-export function globsOverlap(a, b) {
+export function globsOverlap(a: string, b: string): boolean {
   const pa = staticPrefix(a);
   const pb = staticPrefix(b);
   return pa.startsWith(pb) || pb.startsWith(pa);
 }
 
 /** Problems with a declared scope; empty array = acceptable. */
-export function scopeProblems(globs, { denySpecs = true } = {}) {
+export function scopeProblems(globs: readonly string[], { denySpecs = true }: { denySpecs?: boolean } = {}): string[] {
   if (!globs.length) return ["allowed_paths is empty"];
-  const out = [];
+  const out: string[] = [];
   for (const g of globs) {
     const n = normRel(g);
     if (/^(\*+|\*\*\/\*+|\.)$/.test(n) || n === "") out.push(`"${g}" matches the whole repo`);

@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { CFG } from "./config.js";
-import { SKIP_DIRS, git, resolveInRepo, toPosix } from "./repo.js";
-import { isDeniedRead, normRel } from "./taskfile.js";
+import { CFG } from "./config.ts";
+import { SKIP_DIRS, git, resolveInRepo, toPosix } from "./repo.ts";
+import { isDeniedRead, normRel } from "./taskfile.ts";
 
 /**
  * A short, deterministic orientation block added to every prompt so the model
@@ -16,9 +16,9 @@ import { isDeniedRead, normRel } from "./taskfile.js";
  */
 
 const CONVENTION_FILES = ["CONVENTIONS.md", "AGENTS.md", ".deepseek/context.md"];
-const clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-function conventions() {
+function conventions(): string {
   for (const f of CONVENTION_FILES) {
     try {
       const txt = fs.readFileSync(path.join(CFG.repo, f), "utf8").trim();
@@ -30,10 +30,10 @@ function conventions() {
   return "";
 }
 
-function project() {
-  const lines = [];
+function project(): string {
+  const lines: string[] = [];
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(CFG.repo, "package.json"), "utf8"));
+    const pkg = JSON.parse(fs.readFileSync(path.join(CFG.repo, "package.json"), "utf8")) as { name?: string; type?: string; engines?: { node?: string }; scripts?: Record<string, unknown> };
     if (pkg.name) lines.push(`name: ${pkg.name}${pkg.type ? ` (${pkg.type})` : ""}`);
     if (pkg.engines?.node) lines.push(`node: ${pkg.engines.node}`);
     for (const [k, v] of Object.entries(pkg.scripts || {}).slice(0, 12)) lines.push(`npm run ${k}: ${clip(String(v), 80)}`);
@@ -46,7 +46,7 @@ function project() {
   return lines.length ? `## Project\n${clip(lines.join("\n"), 800)}` : "";
 }
 
-function listFiles(dirRel, depth, limit, out) {
+function listFiles(dirRel: string, depth: number, limit: number, out: string[]): void {
   let entries;
   try {
     entries = fs.readdirSync(resolveInRepo(dirRel), { withFileTypes: true });
@@ -65,14 +65,14 @@ function listFiles(dirRel, depth, limit, out) {
 }
 
 /** Directory a glob points into: `src/auth/**` -> `src/auth`, `src/a*.js` -> `src`. */
-function dirOf(glob) {
-  const pre = normRel(glob).split(/[*?]/)[0];
+function dirOf(glob: string): string {
+  const pre = normRel(glob).split(/[*?]/)[0] ?? "";
   const dir = pre === "" || pre.endsWith("/") ? pre.replace(/\/$/, "") : path.posix.dirname(pre);
   return dir === "." ? "" : dir;
 }
 
-function tree(dirs) {
-  const root = [];
+function tree(dirs: string[]): string {
+  const root: string[] = [];
   try {
     for (const e of fs.readdirSync(CFG.repo, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       if (SKIP_DIRS.has(e.name) || isDeniedRead(e.name)) continue;
@@ -86,20 +86,20 @@ function tree(dirs) {
   for (const d of dirs) {
     if (!d || seen.has(d)) continue;
     seen.add(d);
-    const files = [];
+    const files: string[] = [];
     listFiles(d, 3, 30, files);
     if (files.length) parts.push(`${d}/ (${files.length >= 30 ? "first 30 files" : `${files.length} files`}):\n${files.map((f) => `  ${f}`).join("\n")}`);
   }
   return `## Layout\n${clip(parts.join("\n"), 1800)}`;
 }
 
-function commits() {
+function commits(): string {
   const r = git(["log", "--oneline", "-n", "5"]);
   return r.ok && r.out ? `## Recent commits\n${clip(r.out, 500)}` : "";
 }
 
 /** `scope`: the globs the role may write. `targetRel`: the file/dir the handoff points at. */
-export function buildContextPack({ scope = [], targetRel = "" } = {}) {
+export function buildContextPack({ scope = [], targetRel = "" }: { scope?: string[]; targetRel?: string } = {}): string {
   const budget = CFG.contextChars;
   if (!budget) return "";
   const dirs = scope.map(dirOf);

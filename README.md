@@ -66,7 +66,7 @@ The role decides four things: the prompt, the capability set enforced on every t
 ## Requirements
 
 - **Claude Desktop** (Windows)
-- **Node.js 18 or newer**
+- **Node.js 22.18 or newer** (the server is TypeScript run directly by Node's built-in type stripping: no build step, no `dist/`)
 - **Git** for Windows, on `PATH`, with `user.name` and `user.email` set
 - A **DeepSeek API key** from platform.deepseek.com
 
@@ -75,7 +75,8 @@ The role decides four things: the prompt, the capability set enforced on every t
 ```powershell
 cd <this folder>
 npm install
-npm test          # capability checks; no key or network needed
+npm run typecheck # tsc --noEmit, strict
+npm test          # offline tests; no key or network needed
 ```
 
 ## Configure Claude Desktop
@@ -87,7 +88,7 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json` (create it if absent), then *
   "mcpServers": {
     "handoff": {
       "command": "C:\\path\\to\\node.exe",
-      "args": ["C:\\path\\to\\deepseek-mcp\\src\\server.js"],
+      "args": ["C:\\path\\to\\deepseek-mcp\\src\\server.ts"],
       "env": {
         "REPO_ROOT": "C:\\path\\to\\your\\project",
         "DEEPSEEK_API_KEY": "sk-...",
@@ -139,20 +140,25 @@ The `command` **must** be an absolute path to `node.exe`. If you manage Node wit
 | `status: escalate` | The task used its `MAX_FIX_ROUNDS`. Decide yourself; the server won't run another `fix`. |
 | `job … is still running` | One writer at a time. `job_status` with `wait_s` until it finishes. |
 | `task … is not runnable` | The task's `allowed_paths` is empty, too broad, protected, or `test_command` is missing. |
-| Server won't start at all | Run `node src/server.js` in that folder; it prints a clear error on stderr. |
+| Server won't start at all | Run `node src/server.ts` in that folder; it prints a clear error on stderr. |
 
 ## Layout
 
+TypeScript, run as-is on Node 22.18+ (type stripping), so only erasable syntax is used: no `enum`, `namespace` or parameter properties, and imports of local files carry the `.ts` extension. `npm run typecheck` is the compiler check; `npm test` and `npm run smoke` run the `.ts` files directly.
+
 ```
-src/server.js    MCP tools + job orchestration
-src/engine.js    DeepSeek loop, tool definitions, capability checks
-src/roles.js     Role registry + prompt templates
-src/gates.js     Per-mode acceptance gates
-src/repo.js      git/fs helpers, job records, summary parsing
-src/taskfile.js  Task frontmatter + glob matching
-src/context.js   Context pack added to each prompt
-src/branching.js Where jobs start, which branch they use, restoring your branch
-test/tools.mjs   Offline tests (mock DeepSeek + throwaway git repo; needs git)
+src/server.ts    MCP tools + job orchestration
+src/engine.ts    DeepSeek loop, tool definitions, capability checks
+src/roles.ts     Role registry + prompt templates
+src/gates.ts     Per-mode acceptance gates
+src/repo.ts      git/fs helpers, job records, summary parsing
+src/taskfile.ts  Task frontmatter + glob matching
+src/context.ts   Context pack added to each prompt
+src/branching.ts Where jobs start, which branch they use, restoring your branch
+src/config.ts    Environment-driven settings
+src/types.ts     Shared types (roles, jobs, results)
+tsconfig.json    Strict type-check config (tsc --noEmit; nothing is emitted)
+test/tools.ts    Offline tests (mock DeepSeek + throwaway git repo; needs git)
 ```
 
 - Add `specs/.jobs/` and `specs/review/` to your repo's `.gitignore`.
