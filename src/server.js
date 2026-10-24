@@ -1,0 +1,450 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { CFG } from "./config.js";
+import {
+  childEnv,
+  allJobs,
+  appendRunLog,
+  changedFiles,
+  commit,
+  detectBaseRef,
+  git,
+  jobDiff,
+  listJobs,
+  parseSummary,
+  readJob,
+  reapStaleJobs,
+  rel,
+  resolveInRepo,
+  runCmd,
+  snapshot,
+  writeJob,
+} from "./repo.js";
+import { ROLES, ROLE_NAMES, buildPrompt } from "./roles.js";
+import { capsFor, ping as pingModel, runAgent } from "./engine.js";
+import { GAP_RE, gate, makeVerifier } from "./gates.js";
+import { buildContextPack } from "./context.js";
+import { branchExists, discardBranch, latestBranchFor, planBranch, restoreBranch } from "./branching.js";
+import { isDeniedWrite, matchAny, readTask, scopeFor, scopeProblems } from "./taskfile.js";
+
+const PKG = JSON.parse(fs.readFileSync(path.join(CFG.root, "package.json"), "utf8"));
+const log = (...a) => process.stderr.write(`[handoff] ${a.join(" ")}\n`);
+const json = (o) => ({ content: [{ type: "text", text: JSON.stringify(o, null, 2) }] });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** jobId -> { promise, role, mode } for jobs this process is executing right now. */
+const running = new Map();
+/** jobId -> latest progress line. Kept in memory: no file churn, no read-modify-write race. */
+const progress = new Map();
+
+function ensureDirs() {
+  fs.mkdirSync(CFG.jobs, { recursive: true });
+}
+
+function preflight() {
+  if (!CFG.key) return { ok: false, reason: "DEEPSEEK_API_KEY is not set in the MCP server env." };
+  if (!CFG.model) return { ok: false, reason: "DEEPSEEK_MODEL is empty." };
+  const inside = git(["rev-parse", "--is-inside-work-tree"]);
+  if (!inside.ok || inside.out !== "true") {
+    return { ok: false, reason: `REPO_ROOT is not a git repo: ${CFG.repo} (git: ${CFG.git})` };
+  }
+  if (!git(["rev-parse", "HEAD"]).ok) return { ok: false, reason: "repo has no commits yet; make an initial commit first" };
+  const dirty = changedFiles().filter((c) => !c.file.startsWith("specs/"));
+  if (dirty.length) return { ok: false, reason: `working tree not clean: ${dirty.slice(0, 5).map((c) => c.file).join(" | ")}` };
+  CFG.baseRef = detectBaseRef();
+  return { ok: true };
+}
+
+function withDeadline(promise, ms, onAbort) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      try {
+        onAbort?.();
+      } catch {
+        /* ignore */
+      }
+      reject(new Error(`timed out after ${Math.round(ms / 1000)}s`));
+    }, ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+function commitWork(job, task) {
+  const scope = scopeFor(job.role, task);
+  const before = new Set(Object.keys(job.startedChanges || {}));
+  const inScope = changedFiles().filter((c) => !before.has(c.file) && matchAny(c.file, scope) && !isDeniedWrite(c.file, { denySpecs: true }));
+  if (!inScope.length || !scope.length) return { commit: null, commitError: "nothing in scope to commit" };
+  const r = commit(inScope.map((c) => c.file), `task-${task?.id ?? "x"}: ${job.role}`);
+  if (!r.ok) return { commit: null, commitError: r.out.split(/\r?\n/).slice(-3).join(" ") };
+  return { commit: git(["rev-parse", "--short", "HEAD"]).out, commitError: null };
+}
+
+/** The model's last message, kept next to the job record so a bad verdict or summary can be diagnosed. */
+function saveFinal(jobId, text) {
+  try {
+    fs.writeFileSync(path.join(CFG.jobs, `${jobId}.final.txt`), String(text ?? ""));
+  } catch {
+    /* diagnostics only */
+  }
+}
+
+async function executeJob(jobId, ctx) {
+  const job = readJob(jobId);
+  let res = null;
+  let aborted = false;
+  const ctrl = new AbortController();
+  const agent = runAgent({
+    prompt: ctx.prompt,
+    caps: ctx.caps,
+    logPath: job.logPath,
+    signal: ctrl.signal,
+    verify: makeVerifier(ctx.mode, ctx.task),
+    onProgress: (m) => progress.set(jobId, m),
+  });
+
+  try {
+    const out = await withDeadline(agent, CFG.timeoutMs, () => {
+      aborted = true;
+      ctrl.abort();
+    });
+    const summary = parseSummary(out.finalText);
+    const gap = GAP_RE.exec(out.finalText || "")?.[1]?.trim() ?? null;
+    saveFinal(jobId, out.finalText);
+    res = { isError: false, turns: out.turns, usage: out.usage, result: out.finalText, summary, gap, exhausted: out.exhausted, repairs: out.repairs };
+
+    if (ctx.mode === "code" && !gap) {
+      const c = commitWork(job, ctx.task);
+      writeJob(jobId, { ...readJob(jobId), commit: c.commit, commitError: c.commitError });
+    }
+    if (ctx.mode === "code") writeJob(jobId, { ...readJob(jobId), endSha: git(["rev-parse", "HEAD"]).out });
+  } catch (e) {
+    // Give the aborted loop a moment to stop writing before the gate inspects the tree.
+    if (aborted) await Promise.race([agent.catch(() => {}), sleep(10000)]);
+    res = { isError: true, turns: 0, usage: null, result: "", summary: null, error: e.message, gap: null, aborted };
+  }
+
+  const finalJob = readJob(jobId);
+  let result;
+  try {
+    result = await gate(finalJob, res);
+  } catch (e) {
+    result = { status: "failed", reasons: [`gate error: ${e.message}`] };
+  }
+  // The gate has inspected the work branch; now put the human's branch back.
+  result = { ...result, job_id: jobId, ...restoreBranch(finalJob) };
+  writeJob(jobId, { ...finalJob, state: result.status, result, finishedAt: new Date().toISOString() });
+  progress.delete(jobId);
+  appendRunLog({
+    job: jobId,
+    role: finalJob.role,
+    target: finalJob.targetRel,
+    state: result.status,
+    reasons: result.reasons,
+    turns: res?.turns ?? null,
+    usage: res?.usage ?? null,
+    verdict: result.verdict,
+  });
+}
+
+const blocked = (reason, extra = {}) => json({ status: "blocked", reason, ...extra });
+
+/* -------------------------------------------------------------------- server */
+
+CFG.baseRef = detectBaseRef();
+ensureDirs();
+const reaped = reapStaleJobs();
+if (reaped) log(`marked ${reaped} job(s) from a previous run as interrupted`);
+
+const server = new McpServer({ name: "deepseek-handoff", version: PKG.version });
+
+server.tool("version", "Report config, repo, git, base ref, and credential presence.", {}, async () =>
+  json({
+    version: PKG.version,
+    repo: CFG.repo,
+    git: CFG.git,
+    gitVersion: (() => {
+      try {
+        return execFileSync(CFG.git, ["--version"], { encoding: "utf8", timeout: 20000 }).trim();
+      } catch (e) {
+        return `NOT WORKING: ${e.message.split("\n")[0]}`;
+      }
+    })(),
+    baseRef: CFG.baseRef,
+    baseUrl: CFG.baseUrl,
+    model: CFG.model,
+    thinking: CFG.thinking,
+    effort: CFG.thinking === "enabled" ? CFG.effort : null,
+    maxTokens: CFG.maxTokens,
+    keyPresent: Boolean(CFG.key),
+    maxTurns: CFG.maxTurns,
+    diffCap: CFG.diffCap,
+    maxFixRounds: CFG.maxFixRounds,
+    maxRepairs: CFG.maxRepairs,
+    contextChars: CFG.contextChars,
+    maxWaitS: CFG.maxWaitS,
+    node: process.version,
+    // what a test_command sees when it runs `node` - should match the line above
+    testCommandNode: (await runCmd("node --version", 20000)).out.split(/\r?\n/).pop(),
+    diagnostics: {
+      execPath: process.execPath,
+      whereNode: (await runCmd(process.platform === "win32" ? "where node" : "command -v node", 20000)).out.split(/\r?\n/).slice(0, 5),
+      testCommandPathHead: (childEnv()[process.platform === "win32" ? "Path" : "PATH"] || "").split(path.delimiter).slice(0, 4),
+    },
+  })
+);
+
+server.tool("roles", "List the handoff roles, what each produces, and how it is judged.", {}, async () =>
+  json(
+    ROLE_NAMES.map((n) => ({
+      role: n,
+      does: ROLES[n].title,
+      writes: ROLES[n].mode === "doc" ? `${ROLES[n].artifact} under target` : ROLES[n].mode === "code" ? "code + one commit" : "nothing",
+      needs: [ROLES[n].needsTask ? "target = task file" : null, ROLES[n].needsInstruction ? "instruction" : null, ROLES[n].caps === "code" ? "task frontmatter" : null].filter(Boolean),
+      judged_by: ROLES[n].mode,
+      blocks_by_default: Boolean(ROLES[n].wait),
+    }))
+  )
+);
+
+server.tool("ping", "One tiny DeepSeek call. Proves the key, base URL, and model id work.", {}, async () => {
+  if (!CFG.key) return json({ ok: false, reason: "DEEPSEEK_API_KEY is not set" });
+  const t0 = Date.now();
+  try {
+    const r = await withDeadline(pingModel(), 90000);
+    return json({ ok: true, reply: r.reply.slice(0, 300), elapsed_s: Math.round((Date.now() - t0) / 1000), usage: r.usage });
+  } catch (e) {
+    return json({ ok: false, error: e.message, elapsed_s: Math.round((Date.now() - t0) / 1000) });
+  }
+});
+
+server.tool(
+  "handoff",
+  "Delegate one phase to DeepSeek. role decides prompt, capabilities, and the acceptance gate. Waits up to ~45s, then returns a job_id to poll.",
+  {
+    role: z.string().describe(`One of: ${ROLE_NAMES.join(", ")}`),
+    target: z.string().describe("specs/<feature> for doc roles; the task .md file for impl/fix/test; a path for ask"),
+    instruction: z.string().optional().describe("Brief for spec, question for ask, extra steer for others"),
+    feedback_path: z.string().optional().describe("Review markdown to address; required for role=fix"),
+    wait: z.boolean().optional().describe("false = return a job_id immediately; true = wait as long as allowed"),
+    branch: z.string().optional().describe("review only: branch to review (default: newest code branch for the feature)"),
+  },
+  async ({ role: roleName, target, instruction, feedback_path, wait, branch: reviewBranchParam }) => {
+    const role = ROLES[roleName];
+    if (!role) return blocked(`unknown role "${roleName}"; use one of ${ROLE_NAMES.join(", ")}`);
+
+    ensureDirs();
+    const pre = preflight();
+    if (!pre.ok) return blocked(pre.reason);
+
+    // One writer at a time: jobs share a working tree and `git checkout -b`. Read-only asks may overlap.
+    const busy = [...running.entries()].find(([, r]) => r.mode !== "text" && role.mode !== "text");
+    if (busy) return blocked(`job ${busy[0]} (${busy[1].role}) is still running; poll job_status first`);
+
+    let targetRel;
+    try {
+      targetRel = rel(resolveInRepo(String(target || ""))) || ".";
+    } catch (e) {
+      return blocked(e.message);
+    }
+    if (role.mode === "doc" && !targetRel.startsWith("specs/")) {
+      return blocked("doc roles write under specs/ - pass target like specs/<feature>");
+    }
+    if (role.needsInstruction && !instruction) return blocked(`role=${roleName} needs an instruction`);
+    if (role.needsTask && !targetRel.endsWith(".md")) return blocked(`role=${roleName} needs target = a task .md file`);
+
+    let task = null;
+    if (role.needsTask) {
+      try {
+        task = readTask(targetRel);
+      } catch (e) {
+        return blocked(`cannot read task file: ${e.message}`);
+      }
+      const scope = scopeFor(roleName, task);
+      const problems = scope.length ? scopeProblems(scope) : [roleName === "test" ? "task has no test-path glob in allowed_paths" : "allowed_paths is empty"];
+      if (!task.testCommand) problems.push("test_command is empty");
+      if (problems.length) return blocked(`task ${targetRel} is not runnable: ${problems.join("; ")}`);
+    }
+
+    let feedback = null;
+    if (feedback_path) {
+      try {
+        feedback = fs.readFileSync(resolveInRepo(feedback_path), "utf8");
+      } catch (e) {
+        return blocked(`cannot read feedback: ${e.message}`);
+      }
+    }
+    if (roleName === "fix" && !feedback) return blocked("role=fix requires feedback_path");
+
+    // The human's rules, enforced: no identical retry of a failed call, and a cap on fix rounds.
+    const history = allJobs();
+    const key = crypto.createHash("sha1").update([roleName, targetRel, instruction || "", feedback || ""].join("\0")).digest("hex");
+    const prior = history.filter((j) => j.key === key).pop();
+    if (prior && prior.state === "failed" && !prior.result?.infra) {
+      return blocked(`identical to failed job ${prior.jobId}; read its reasons and change the instruction, task or feedback instead of retrying`, { prior_reasons: prior.result?.reasons ?? [] });
+    }
+    if (roleName === "fix") {
+      const used = history.filter((j) => j.role === "fix" && j.targetRel === targetRel && ["done", "failed", "noop"].includes(j.state) && !j.result?.infra).length;
+      if (used >= CFG.maxFixRounds) {
+        return json({ status: "escalate", reason: `${used} fix round(s) already used on ${targetRel} (max ${CFG.maxFixRounds}); hand this back to the human` });
+      }
+    }
+
+    // Where the human is now (we return here when the job ends) and where the job should work.
+    const baseBranch = git(["rev-parse", "--abbrev-ref", "HEAD"]).out;
+    const baseSha = git(["rev-parse", "HEAD"]).out;
+    let branch = null;
+    let reviewBranch = null;
+    let switched = false;
+    let createdBranch = false;
+    let startedFrom = null;
+    if (role.branch) {
+      const plan = planBranch({ roleName, task, targetRel, history, baseRef: CFG.baseRef });
+      if (plan.error) return blocked(plan.error);
+      startedFrom = plan.from;
+      if (plan.mode === "continue") {
+        branch = plan.branch;
+        const co = git(["checkout", branch]);
+        if (!co.ok) return blocked(`cannot switch to ${branch}: ${co.out}`);
+      } else {
+        branch = `${roleName}/${task?.id ?? "x"}-${Date.now().toString(36)}`;
+        const co = git(["checkout", "-b", branch, plan.from]);
+        if (!co.ok) return blocked(`branch create failed: ${co.out}`);
+        createdBranch = true;
+      }
+      switched = true;
+    } else if (roleName === "review") {
+      reviewBranch = reviewBranchParam || latestBranchFor(history, targetRel);
+      if (reviewBranchParam && !branchExists(reviewBranchParam)) return blocked(`branch not found: ${reviewBranchParam}`);
+      if (reviewBranch && reviewBranch !== baseBranch) {
+        const co = git(["checkout", reviewBranch]);
+        if (!co.ok) return blocked(`cannot switch to ${reviewBranch}: ${co.out}`);
+        switched = true;
+      }
+    }
+    const startedSha = git(["rev-parse", "HEAD"]).out;
+    const startedChanges = snapshot();
+
+    const jobId = crypto.randomUUID().slice(0, 8);
+    const promptPath = path.join(CFG.jobs, `${jobId}.prompt.txt`);
+    const pack = buildContextPack({ scope: task ? scopeFor(roleName, task) : [], targetRel });
+    const prompt = buildPrompt(roleName, { target: targetRel, instruction, feedback, task, pack });
+    fs.writeFileSync(promptPath, prompt);
+
+    writeJob(jobId, {
+      jobId,
+      key,
+      role: roleName,
+      mode: role.mode,
+      artifact: role.artifact ?? null,
+      headings: role.headings ?? [],
+      targetRel,
+      branch,
+      reviewBranch,
+      baseBranch,
+      baseSha,
+      switched,
+      createdBranch,
+      startedFrom,
+      task: task?.id ?? null,
+      allowedPaths: task?.allowedPaths ?? [],
+      startedSha,
+      startedChanges,
+      logPath: path.join(CFG.jobs, `${jobId}.log`),
+      promptPath,
+      packChars: pack.length,
+      startedAt: new Date().toISOString(),
+      state: "running",
+    });
+
+    const promise = executeJob(jobId, { prompt, caps: capsFor(roleName, role, task), mode: role.mode, task })
+      .catch((e) => {
+        log(`job ${jobId} crashed: ${e.message}`);
+        const j = readJob(jobId);
+        if (j && j.state === "running") writeJob(jobId, { ...j, state: "failed", result: { status: "failed", infra: true, reasons: [`server error: ${e.message}`], ...restoreBranch(j) }, finishedAt: new Date().toISOString() });
+      })
+      .finally(() => {
+        running.delete(jobId);
+        progress.delete(jobId);
+      });
+    running.set(jobId, { promise, role: roleName, mode: role.mode });
+
+    const natural = wait === false ? 0 : wait === true ? role.wait || 150 : role.wait || 0;
+    const seconds = Math.min(natural, CFG.maxWaitS);
+    if (seconds) {
+      const outcome = await Promise.race([promise.then(() => "done"), sleep(seconds * 1000).then(() => "timeout")]);
+      if (outcome === "done") {
+        const done = readJob(jobId);
+        return json({ status: done.state, job_id: jobId, ...done.result });
+      }
+    }
+    return json({ status: "running", job_id: jobId, role: roleName, branch, started_from: startedFrom, base_branch: baseBranch, next: "poll job_status(job_id, wait_s=40)" });
+  }
+);
+
+server.tool(
+  "job_status",
+  "Poll a handoff. Returns progress while running, the gated verdict once done. wait_s blocks up to that many seconds for it to finish.",
+  { job_id: z.string(), wait_s: z.number().int().min(0).max(120).optional() },
+  async ({ job_id, wait_s }) => {
+    if (!/^[0-9a-f]{8}$/.test(job_id)) return json({ status: "unknown_job" });
+    const live = running.get(job_id);
+    if (live && wait_s) await Promise.race([live.promise, sleep(Math.min(wait_s, CFG.maxWaitS) * 1000)]);
+    const job = readJob(job_id);
+    if (!job) return json({ status: "unknown_job" });
+    if (job.state === "running") {
+      return json({
+        status: "running",
+        role: job.role,
+        elapsed_s: Math.round((Date.now() - Date.parse(job.startedAt)) / 1000),
+        progress: progress.get(job_id) ?? "(starting)",
+      });
+    }
+    return json({ status: job.state, ...job.result });
+  }
+);
+
+server.tool(
+  "job_diff",
+  "Read the code diff a finished impl/fix/test job committed, so you can judge it yourself. Paged: pass offset=next_offset to continue.",
+  { job_id: z.string(), offset: z.number().int().min(0).optional() },
+  async ({ job_id, offset }) => {
+    if (!/^[0-9a-f]{8}$/.test(job_id)) return json({ status: "unknown_job" });
+    const job = readJob(job_id);
+    if (!job) return json({ status: "unknown_job" });
+    if (job.state === "running") return json({ status: "running", job_id });
+    return json({ job_id, role: job.role, branch: job.branch ?? null, ...jobDiff(job, offset || 0) });
+  }
+);
+
+server.tool(
+  "discard",
+  "Delete the work branch of a finished impl/fix/test job. Refuses if the branch has commits that are not merged into the base, unless force=true (the result then includes how to recover it). Never touches the base branch or the branch you are on.",
+  { job_id: z.string(), force: z.boolean().optional() },
+  async ({ job_id, force }) => {
+    if (!/^[0-9a-f]{8}$/.test(job_id)) return json({ status: "unknown_job" });
+    const job = readJob(job_id);
+    if (!job) return json({ status: "unknown_job" });
+    if (job.state === "running") return blocked(`job ${job_id} is still running`);
+    if (!job.branch) return blocked("this job has no branch (doc, review and ask jobs write none)");
+    if ([...running.values()].some((r) => r.mode !== "text")) return blocked("a job is running; wait for it to finish before deleting branches");
+    const pre = preflight();
+    if (!pre.ok) return blocked(pre.reason);
+    const res = discardBranch({ branch: job.branch, baseRef: CFG.baseRef, force: Boolean(force) });
+    if (res.error) return json({ status: res.gone ? "gone" : "refused", job_id, reason: res.error, ...(res.unmerged_commits ? { unmerged_commits: res.unmerged_commits, tip: res.tip } : {}) });
+    writeJob(job_id, { ...job, discardedAt: new Date().toISOString() });
+    return json({ status: "discarded", job_id, ...res });
+  }
+);
+
+server.tool("jobs", "List recent handoffs with their state.", {}, async () => json(listJobs(12)));
+
+process.on("unhandledRejection", (e) => log("unhandled rejection:", String(e)));
+await server.connect(new StdioServerTransport());
+log(`ready - repo=${CFG.repo} base=${CFG.baseRef} model=${CFG.model} roles=${ROLE_NAMES.length}`);

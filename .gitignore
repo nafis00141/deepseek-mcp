@@ -1,0 +1,5 @@
+node_modules/
+.env
+.npm-cache/
+specs/.jobs/
+specs/review/

@@ -1,0 +1,19 @@
+{
+  "name": "deepseek-mcp",
+  "version": "0.8.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server for Claude Desktop: hand off SDLC phases to DeepSeek, with server-side acceptance gates.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node --check src/server.js && node --check src/engine.js && node --check src/gates.js && node --check src/repo.js && node --check src/roles.js && node --check src/taskfile.js && node --check src/config.js && node --check src/context.js && node --check src/branching.js",
+    "test": "node test/tools.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  }
+}
