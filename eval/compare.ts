@@ -6,6 +6,9 @@
  * Rule (spec AC-19), applied to the dev tasks:
  *   gain  = a task's hidden-pass mean rose by at least --delta; loss = it fell by at least --delta
  *   KEEP  needs (gains - losses) >= --min-net AND the pooled held-out hidden-pass mean not below baseline by more than --heldout-tol
+ *   A ceiling task (hard, passes > 80% on the baseline) cannot count as a gain; a floor task (< 20%) cannot count as a loss.
+ *   KEEP also needs the net over tasks not authored after a result was seen (`authored_after_result`) to reach --min-net.
+ *   A calibration-purpose run is refused as a baseline.
  *   REJECT if the net is negative, the held-out guard fails, or tasks lost without any gain
  *   otherwise INCONCLUSIVE: the evidence points the right way but is too thin to act on
  * Held-out tasks are never itemised, only their pooled aggregate.
@@ -15,8 +18,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LookResult } from "./lib/looks.ts";
 import { spendLook } from "./lib/looks.ts";
+import { frozenProblem, loadBands } from "./lib/calibration.ts";
+import { loadTasks } from "./lib/fixture.ts";
 import { isPrivate } from "./lib/privacy.ts";
 import { nonInferiority, signFlipPValue } from "./lib/stats.ts";
+import type { Band } from "./lib/calibration.ts";
 import type { Tier } from "./lib/types.ts";
 import type { NonInferiority } from "./lib/stats.ts";
 import { aggregate, scoreRun } from "./score.ts";
@@ -34,6 +40,14 @@ export interface CompareOpts {
   looks?: LookResult;
   /** A final decision: KEEP additionally needs a paired improvement test on dev and a non-inferiority test on held-out (FINAL_ALPHA). */
   final?: boolean;
+  /** Difficulty bands of the hard dev tasks (calibration.json). A ceiling task cannot count as a gain, a floor task cannot count as a loss. */
+  bands?: Map<string, Band>;
+  /** Ids of tasks written after their author had seen a result for the family (`authored_after_result: true`). KEEP needs the net without them too. */
+  afterResult?: Set<string>;
+  /** Only compare dev tasks of this tier. */
+  tier?: Tier;
+  /** Dev tasks only: no held-out guard, no look budget. Used by the chance check, never by a real decision. */
+  devOnly?: boolean;
 }
 
 /** The significance level of the final decision, one-sided. Fixed here and in eval/loop.md, before any final run. */
@@ -55,6 +69,12 @@ export interface TaskDelta {
   cand: Aggregate;
   delta: number;
   verdict: "gain" | "loss" | "same";
+  /** calibration band of a hard task; null for a task that was not calibrated */
+  band: Band | null;
+  /** false when the verdict is shown but does not enter the net: a gain on a ceiling task, a loss on a floor task */
+  counted: boolean;
+  /** true when the task was authored after its author had seen a result for the family */
+  after_result: boolean;
   /** largest gap between the individual baselines for this task: how far two identical-code runs already differ */
   noise: number | null;
 }
@@ -67,6 +87,8 @@ export interface Comparison {
   gains: number;
   losses: number;
   net: number;
+  /** the net again, over tasks not authored after a result was seen */
+  net_clean: number;
   heldout: HeldoutGuard | null;
   /** Set when the guard could not be applied for a reason other than the look budget (for example no common held-out tasks). */
   heldout_problem: string | null;
@@ -148,11 +170,15 @@ const byTask = (rows: RunRow[]): Map<string, RunRow[]> => {
 
 export function compareRuns(baselineDirs: string[], candidateDir: string, opts: CompareOpts): Comparison {
   const bases = baselineDirs.map((d) => scoreRun(d));
+  // A calibration run was used to choose the bands; as a comparison baseline it would be graded on the exam it wrote.
+  for (const b of bases) {
+    if ((b.manifest as { purpose?: string | null } | null)?.purpose === "calibration") throw new Error(`${b.run_id} is a calibration run and cannot be a comparison baseline: run a fresh baseline with --purpose comparison`);
+  }
   const cand = scoreRun(candidateDir);
   const baseRows = bases.flatMap((b) => b.rows);
   // Only dev drives gains and losses and only held-out is the regression guard; confirm and reserve rows belong to neither.
-  const devOf = (rows: RunRow[]): RunRow[] => rows.filter((r) => !isPrivate(r.split));
-  const heldOf = (rows: RunRow[]): RunRow[] => rows.filter((r) => r.split === "heldout");
+  const devOf = (rows: RunRow[]): RunRow[] => rows.filter((r) => !isPrivate(r.split) && (!opts.tier || r.tier === opts.tier));
+  const heldOf = (rows: RunRow[]): RunRow[] => (opts.devOnly || opts.tier ? [] : rows.filter((r) => r.split === "heldout"));
   const bT = byTask(devOf(baseRows));
   const cT = byTask(devOf(cand.rows));
   const perBaseline = bases.map((b) => byTask(devOf(b.rows)));
@@ -165,14 +191,19 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
     const c = aggregate(crs);
     const delta = r3(mean(c.hidden_pass) - mean(base.hidden_pass));
     const means = perBaseline.map((m) => (m.get(task)?.length ? mean(aggregate(m.get(task)!).hidden_pass) : null)).filter((x): x is number => x !== null);
+    const verdict = delta >= opts.delta ? "gain" : delta <= -opts.delta ? "loss" : "same";
+    const band = opts.bands?.get(task) ?? null;
     dev.push({
-      task, family: brs[0]!.family, tier: brs[0]!.tier, base, cand: c, delta, verdict: delta >= opts.delta ? "gain" : delta <= -opts.delta ? "loss" : "same",
+      task, family: brs[0]!.family, tier: brs[0]!.tier, base, cand: c, delta, verdict,
+      band, counted: !((verdict === "gain" && band === "ceiling") || (verdict === "loss" && band === "floor")), after_result: opts.afterResult?.has(task) ?? false,
       noise: means.length > 1 ? r3(Math.max(...means) - Math.min(...means)) : null,
     });
   }
-  const gains = dev.filter((d) => d.verdict === "gain").length;
-  const losses = dev.filter((d) => d.verdict === "loss").length;
+  const tally = (ds: TaskDelta[]): { gains: number; losses: number } => ({ gains: ds.filter((d) => d.counted && d.verdict === "gain").length, losses: ds.filter((d) => d.counted && d.verdict === "loss").length });
+  const { gains, losses } = tally(dev);
   const net = gains - losses;
+  const clean = tally(dev.filter((d) => !d.after_result));
+  const net_clean = clean.gains - clean.losses;
 
   // Pool held-out rows only over the tasks both sides ran: after a rotation, or when tasks were added, old baselines and a new
   // candidate can cover different sets, and a pooled rate over different sets compares nothing.
@@ -208,9 +239,12 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
     if (net < 0) reasons.push(`net ${net}: more dev tasks got worse than better`);
     if (losses > 0 && gains === 0) reasons.push(`${losses} dev task(s) got worse and none better`);
     if (heldout && !heldout.ok) reasons.push(`held-out hidden-pass fell by ${Math.abs(heldout.delta)} (tolerance ${heldout.tolerance}, ${heldout.tolerance_source})`);
-  } else if (net >= opts.minNet) {
+  } else if (net >= opts.minNet && net_clean >= opts.minNet) {
     decision = "KEEP";
-    reasons.push(`net ${net} >= ${opts.minNet} with the held-out guard intact`);
+    reasons.push(`net ${net} >= ${opts.minNet}${net_clean !== net ? ` and ${net_clean} without tasks authored after a result` : ""} with the held-out guard intact`);
+  } else if (net >= opts.minNet) {
+    decision = "INCONCLUSIVE";
+    reasons.push(`net ${net} reaches ${opts.minNet} only with tasks authored after a result was seen; without them it is ${net_clean}`);
   } else {
     decision = "INCONCLUSIVE";
     reasons.push(net > 0 ? `net ${net} is below the required ${opts.minNet}: the direction is right but the dev set is too small to act on` : "no dev task changed by the required margin");
@@ -251,7 +285,9 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   const cTok = mean(aggregate(cand.rows).tokens_total);
   const token_ratio = bTok > 0 ? Math.round((cTok / bTok) * 100) / 100 : null;
   if (token_ratio !== null && token_ratio > 1.25) reasons.push(`cost warning: mean tokens per run rose ${Math.round((token_ratio - 1) * 100)}%`);
-  return { baselines: bases.map((b) => b.run_id), candidate: cand.run_id, opts, dev, gains, losses, net, heldout, overall: { base: aggregate(baseRows), cand: aggregate(cand.rows) }, token_ratio, decision, reasons, heldout_problem, final };
+  const skipped = dev.filter((d) => !d.counted);
+  if (skipped.length) reasons.push(`not counted: ${skipped.map((d) => `${d.task} (${d.verdict} on a ${d.band} task)`).join(", ")}`);
+  return { baselines: bases.map((b) => b.run_id), candidate: cand.run_id, opts, dev, gains, losses, net, net_clean, heldout, overall: { base: aggregate(baseRows), cand: aggregate(cand.rows) }, token_ratio, decision, reasons, heldout_problem, final };
 }
 
 const pct = (s: Stat | null): string => (s ? `${Math.round(s.mean * 100)}%` : "-");
@@ -263,9 +299,9 @@ export function renderComparison(c: Comparison): string {
   const out = [`# Compare - ${c.candidate} vs ${c.baselines.join(" + ")}`, ""];
   out.push(`Rule: a dev task is a gain/loss when its hidden-pass mean moves by >= ${c.opts.delta}; KEEP needs net >= ${c.opts.minNet} and held-out within the tolerance below.`, "");
   out.push(`## Decision: ${c.decision}`, "", ...c.reasons.map((r) => `- ${r}`), "");
-  out.push("## Dev tasks (hidden pass, paired)", "", "| task | tier | family | hidden pass | change | false accept | compliance | tokens | noise between baselines | |", "|---|---|---|---|---|---|---|---|---|---|");
-  for (const d of c.dev) out.push(`| ${d.task} | ${d.tier} | ${d.family} | ${arrow(d.base.hidden_pass, d.cand.hidden_pass)} | ${sign(d.delta)} | ${arrow(d.base.false_accept, d.cand.false_accept)} | ${arrow(d.base.compliance, d.cand.compliance)} | ${k(d.base.tokens_total)} -> ${k(d.cand.tokens_total)} | ${d.noise === null ? "-" : sign(d.noise)} | ${d.verdict === "same" ? "" : d.verdict} |`);
-  out.push("", `gains ${c.gains}, losses ${c.losses}, net ${c.net}`, "");
+  out.push("## Dev tasks (hidden pass, paired)", "", "| task | tier | band | family | hidden pass | change | false accept | compliance | tokens | noise between baselines | |", "|---|---|---|---|---|---|---|---|---|---|---|");
+  for (const d of c.dev) out.push(`| ${d.task} | ${d.tier}${d.after_result ? " (after result)" : ""} | ${d.band ?? "-"} | ${d.family} | ${arrow(d.base.hidden_pass, d.cand.hidden_pass)} | ${sign(d.delta)} | ${arrow(d.base.false_accept, d.cand.false_accept)} | ${arrow(d.base.compliance, d.cand.compliance)} | ${k(d.base.tokens_total)} -> ${k(d.cand.tokens_total)} | ${d.noise === null ? "-" : sign(d.noise)} | ${d.verdict === "same" ? "" : d.counted ? d.verdict : `${d.verdict} (not counted)`} |`);
+  out.push("", `gains ${c.gains}, losses ${c.losses}, net ${c.net}; net without tasks authored after a result: ${c.net_clean}`, "");
   out.push("## Aggregates", "", "| | hidden pass | false accept | first try | compliance |", "|---|---|---|---|---|");
   out.push(`| all runs | ${arrow(c.overall.base.hidden_pass, c.overall.cand.hidden_pass)} | ${arrow(c.overall.base.false_accept, c.overall.cand.false_accept)} | ${arrow(c.overall.base.first_try, c.overall.cand.first_try)} | ${arrow(c.overall.base.compliance, c.overall.cand.compliance)} |`);
   if (c.heldout) out.push(`| held-out (aggregate) | ${arrow(c.heldout.base.hidden_pass, c.heldout.cand.hidden_pass)} (${sign(c.heldout.delta)}, ${c.heldout.ok ? "within tolerance" : "REGRESSED"}) | ${arrow(c.heldout.base.false_accept, c.heldout.cand.false_accept)} | ${arrow(c.heldout.base.first_try, c.heldout.cand.first_try)} | ${arrow(c.heldout.base.compliance, c.heldout.cand.compliance)} |`);
@@ -309,8 +345,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   } catch {
     /* no manifest: keyed by run id */
   }
+  const evalDir = path.dirname(fileURLToPath(import.meta.url));
+  const bands = loadBands(evalDir);
+  const afterResult = new Set(loadTasks([path.join(evalDir, "tasks")], ["dev"]).filter((t) => t.authored_after_result === true).map((t) => t.id));
+  const stale = frozenProblem(evalDir);
   const look = spendLook(path.join(runs, "heldout-looks.json"), candLineage, Number(get("heldout-budget") ?? 4), Number(get("heldout-total") ?? 12));
-  const result = compareRuns(base.map(dir), dir(cand), { minNet: Number(get("min-net") ?? 2), delta: Number(get("delta") ?? 0.4), ...(get("heldout-tol") !== undefined ? { heldoutTol: Number(get("heldout-tol")) } : {}), ignoreHeldout: !look.allowed, looks: look, final: args.includes("--final") });
+  const result = compareRuns(base.map(dir), dir(cand), { minNet: Number(get("min-net") ?? 2), delta: Number(get("delta") ?? 0.4), ...(get("heldout-tol") !== undefined ? { heldoutTol: Number(get("heldout-tol")) } : {}), ignoreHeldout: !look.allowed, looks: look, final: args.includes("--final"), bands, afterResult });
+  if (stale) result.reasons.push(stale);
   const text = renderComparison(result);
   fs.writeFileSync(path.join(dir(cand), "compare.md"), text);
   console.log(text);
