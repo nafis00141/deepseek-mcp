@@ -183,6 +183,11 @@ if (configProblem) {
   console.error(`[handoff] ${configProblem}`);
   process.exit(1);
 }
+// `--check-config`: say the settings are valid and stop (the eval runner asks the pinned server copy this before it spends anything).
+if (process.argv.includes("--check-config")) {
+  console.log("ok");
+  process.exit(0);
+}
 CFG.baseRef = detectBaseRef();
 ensureDirs();
 const reaped = reapStaleJobs();

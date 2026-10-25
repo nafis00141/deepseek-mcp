@@ -8,6 +8,9 @@ const INHERIT = ["path", "systemroot", "windir", "comspec", "pathext", "temp", "
 /** Context-window settings (Specs/long-context). They are an arm's property, so a task may not override them: that would not show in the manifest. */
 export const CONTEXT_SETTINGS = ["CONTEXT_MODE", "COMPACT_CHARS", "COMPACT_LOW", "CONTEXT_TOKENS", "CONTEXT_WINDOW", "READ_BUDGET_CHARS", "READ_MAX_LINES", "RESULT_LIMIT_CHARS", "MAX_REQUEST_BYTES", "JOB_INPUT_TOKEN_CAP"];
 
+/** The context settings an arm is allowed to change when two runs of identical server code are compared (the rest must be the same on both sides). */
+export const ARM_SETTINGS = ["CONTEXT_MODE", "COMPACT_CHARS", "COMPACT_LOW", "CONTEXT_TOKENS", "CONTEXT_WINDOW", "READ_BUDGET_CHARS", "READ_MAX_LINES", "RESULT_LIMIT_CHARS"];
+
 /** Server settings a runner may pass through to the server under test. */
 const TASK_SETTINGS = ["DEEPSEEK_MODEL", "DEEPSEEK_EFFORT", "DEEPSEEK_THINKING", "MAX_TOKENS", "MAX_TURNS", "TIMEOUT_MS", "REQUEST_TIMEOUT_MS", "MAX_REPAIRS", "CONTEXT_CHARS", "MAX_FIX_ROUNDS", "DIFF_CAP", "MAX_WAIT_S"];
 export const SERVER_SETTINGS = [...TASK_SETTINGS, ...CONTEXT_SETTINGS];

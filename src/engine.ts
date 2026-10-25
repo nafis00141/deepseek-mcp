@@ -331,7 +331,14 @@ export function packResult(out: unknown, limit = CFG.resultLimitChars): string {
   let preview = s.slice(0, limit - 300);
   // extended mode: the preview ends at a line boundary (inside the escaped JSON text a line break is the two characters \n)
   if (CFG.contextMode === "extended") {
-    const at = preview.lastIndexOf("\\n");
+    // a line break is a backslash followed by n, but only when the run of backslashes before the n is odd (an even run is escaped backslashes)
+    let at = preview.lastIndexOf("\\n");
+    while (at >= 0) {
+      let run = 0;
+      while (at - run >= 0 && preview[at - run] === "\\") run++;
+      if (run % 2 === 1) break;
+      at = at === 0 ? -1 : preview.lastIndexOf("\\n", at - 1);
+    }
     if (at > preview.length * 0.5) preview = preview.slice(0, at);
   }
   return JSON.stringify({ error: `result too large (${s.length} chars); narrow the request or page it`, preview });

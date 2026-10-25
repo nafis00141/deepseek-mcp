@@ -1,6 +1,6 @@
 # Tasks: using the 1M-token context window
 
-Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.md` (v4).
+Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.md` (v5).
 
 ## Status
 
@@ -12,6 +12,8 @@ Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.
 | T7 runner, proxy, compare | done; `--upstream-timeout`, timeouts in the manifest, `task.env` refusal, `--dev-only` (SCREENING), `--axis`, `--exclude-axis`, `--tasks` |
 | compare fixes from review 4 | done: SCREEN PASS wording, unknown filter refused, filtered aggregates and cost ratio, exclusion-rate refusal (>10 points), like-for-like settings check, `--dev-only --final` refused; `confirm.ts` refuses two runs of the same server code and takes `--upstream-timeout`; the proxy charges an estimate for timed-out upstream calls against the cap and counts them; the runner validates the arm's context settings before spending and records the effective values and task env |
 | job guard | a final answer that fails its self-check no longer gets a repair turn once the cap is reached |
+| review 5 fixes | done: REFUSED decision (capped arm, unequal exclusions, unlike manifests: server code, timeouts, non-arm settings incl. `JOB_INPUT_TOKEN_CAP`, per-task env), excluded records carry axis/tier, `--exclude-axis` on an absent axis is a note, the runner asks the pinned server copy (`--check-config`) and refuses `--resume` with different settings and an upstream timeout not above `REQUEST_TIMEOUT_MS`, the proxy charges only timeouts and keeps the estimate apart from measured cost, `CONTEXT_MODE=extended` is refused until T3 |
+| T7b interleaved arms | not started |
 | T2, T3, T6 (the rest), T8-T13 | not started |
 
 Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and `test/eval-calibrate.test.ts`. Full suite 274 tests, none failing.
@@ -29,7 +31,7 @@ Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and
 - Depends on: T1.
 
 ## T3. Token-aware, cache-friendly compaction modes
-- Goal: extended mode: token budget (last `prompt_tokens` plus an estimate for new messages, falling back to characters), fixed marker, cut messages tracked in a side `WeakSet`, consistent escaped-JSON sizes, watermark cut-down, then ending the job as exhausted with reason `context_budget` if the budget is still unreachable (never dropping `reasoning_content`: the API answers 400 without it in a tool loop). Add `context_budget` to `exhaustedReason`, the gate text and `engine.ts`.
+- Goal: extended mode: the `CHARS_PER_TOKEN` setting (default 3.5) for the estimate, token budget (last `prompt_tokens` plus an estimate for new messages, falling back to characters), fixed marker, cut messages tracked in a side `WeakSet`, consistent escaped-JSON sizes, watermark cut-down, then ending the job as exhausted with reason `context_budget` if the budget is still unreachable (never dropping `reasoning_content`: the API answers 400 without it in a tool loop). Add `context_budget` to `exhaustedReason`, the gate text and `engine.ts`.
 - Files: `src/compact.ts`, `src/engine.ts`, `src/types.ts` (`exhaustedReason` gains `context_budget`), `src/gates.ts` (gate text), `src/config.ts` (flip `COMPACTION_BUILT`), `test/compact.test.ts`.
 - Done when: works with usage and without; no cut message is ever changed again and no marker field reaches the request body; on a synthetic 40-turn conversation the watermark gives at most half as many prefix-changing turns as no watermark; first two and last six messages untouched; the unreachable-budget path ends as `context_budget` and is tested. (AC-2, AC-3)
 - Depends on: T2.
@@ -46,10 +48,16 @@ Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and
 - Done when: a mock model requesting large reads ends with the cap reason and reaches the gates as exhausted with commit rules unchanged; cap off is unchanged; an oversize body is refused before sending. (AC-5, AC-10)
 - Depends on: T1.
 
+## T7b. Interleaved arm runs
+- Goal: run several arms in one go with the (task, k) cells interleaved in a randomised order, recorded in each manifest, so provider load, cache warm-up and peak against off-peak pricing do not line up with an arm. Same pinned code, per-arm settings, per-arm run folders and caps.
+- Files: `eval/run.ts` (or a thin `eval/arms.ts` over `runEval`), tests with the stub upstream.
+- Done when: the recorded order is a permutation covering every cell once per arm; a test shows no arm always goes first; each arm's manifest carries its settings and the shared order; caps and the exclusion rules still hold per arm. (AC-8)
+- Depends on: T7.
+
 ## T6. Trace and score metrics (needs T4 for the returned from/to; both done or in the same change)
 - Goal: `compact` trace event; peak prompt tokens, cache-hit share, compactions, overlap-based repeat reads, reasoning tokens, truncated events and timeouts in `score.ts`; columns in compare tables.
 - Files: `src/types.ts`, `src/trace.ts` (`summarizeResult` for `read_file`), `eval/score.ts`, `eval/compare.ts`, tests.
-- Done when: synthetic traces give the expected numbers (ordinary paging is not a repeat); a trace from before this change still scores. (AC-6)
+- Done when: synthetic traces give the expected numbers (ordinary paging is not a repeat; the longest turn latency per run and per arm is reported); a trace from before this change still scores. (AC-6)
 - Depends on: T3.
 
 ## T7. Runner, proxy and compare support
@@ -79,7 +87,7 @@ Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and
 - Goal: write the four arms (the top arm only if the pilot's peak prompt tokens are at least 1.5 times the primary's), the guard definition and its false-block rate, the job count, wall-clock and concurrency, the task list, k, identical timeouts and `JOB_INPUT_TOKEN_CAP`, the cost estimate from `eval/pricing.json` and the pilot results (k=1 on all arms, to catch broken scenarios and calibrate cost). Pre-register that arm (c) vs (a) decides. Ask the owner before the full run.
 - Files: `Specs/long-context/experiment.md`.
 - Done when: the negative control (baseline twice) is specified; the task list is fixed; the estimate (including retries and calibration of the XL tasks at defaults) is written; the owner has approved it. (AC-8, AC-9)
-- Depends on: T4, T6, T7, T9, T10.
+- Depends on: T4, T6, T7, T7b, T9, T10. Also fixes the cost and time estimate: 300 XL jobs one after another at 15-60 minutes each is roughly 75-300 hours, so concurrency (`--parallel`) and the interleaved order are decided here.
 
 ## T12. Run, compare, decide (needs approval)
 - Goal: baseline, caps-only, primary, top; XL tasks at k=10, related and regression tasks at k=5; `--max-cost`; compare each arm to the baseline with `--dev-only` (a SCREENING verdict; the decision counts the XL tasks only and the other tasks are a loss guard); run the negative control first; add cost, latency, peak tokens and cache-hit share; a capped arm is excluded; triage failures through the reviewer bundle. Write the result and a recommendation. The owner decides Q1 and Q2; any default change is a separate candidate branch through the normal loop and confirmation.

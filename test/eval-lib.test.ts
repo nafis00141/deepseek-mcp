@@ -70,7 +70,7 @@ describe("proxy", () => {
     await up.close();
   });
 
-  it("a timed-out upstream call is counted and charged an estimate against the cap, because it may still be billed", async () => {
+  it("a timed-out upstream call is counted and an estimate counts toward the cap, apart from the measured cost; a refused connection is not charged", async () => {
     const hang = http.createServer(() => { /* never answers */ });
     await new Promise<void>((r) => hang.listen(0, "127.0.0.1", () => r()));
     open.push(() => new Promise<void>((r) => { hang.closeAllConnections(); hang.close(() => r()); }));
@@ -79,9 +79,15 @@ describe("proxy", () => {
     const call = () => fetch(`${proxy.url}/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${s.bearer}` }, body: "x".repeat(4000) });
     const first = await call();
     assert.equal(first.status, 502);
-    assert.deepEqual([s.stats.upstream_failures, s.stats.cost, s.stats.prompt], [1, costOf(PRICING, 1000, 0, 0), 0]);
+    assert.deepEqual([s.stats.upstream_failures, s.stats.cost, s.stats.estimated_cost, s.stats.prompt], [1, 0, costOf(PRICING, 500, 0, 0), 0], "4000 bytes is about 500 tokens as all misses; the measured cost is untouched");
     assert.equal((await call()).status, 402, "the estimate counts toward --max-cost, so the next request is refused");
     await proxy.close();
+    const dead = await startProxy({ upstream: "http://127.0.0.1:9", apiKey: "sk-REAL-KEY-123456", pricing: PRICING });
+    const ds = dead.session();
+    const refused = await fetch(`${dead.url}/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${ds.bearer}` }, body: "x".repeat(4000) });
+    assert.equal(refused.status, 502);
+    assert.deepEqual([ds.stats.upstream_failures, ds.stats.estimated_cost], [1, 0], "nothing reached the upstream, so nothing is charged");
+    await dead.close();
   });
 
   it("rejects unknown bearers without contacting upstream", async () => {
@@ -337,10 +343,36 @@ describe("runner end to end (real server, stub upstream)", () => {
 
   it("context settings given to the runner are recorded in the manifest, and so is a changed upstream timeout", async () => {
     const up = await stubUpstream();
-    const r = await runEval(opts(up.url, { only: ["ask-stub"], runId: "r-context", upstreamTimeoutS: 900, serverEnv: { ...process.env, CONTEXT_MODE: "extended", READ_MAX_LINES: "2000", JOB_INPUT_TOKEN_CAP: "6000000" } }));
+    const r = await runEval(opts(up.url, { only: ["ask-stub"], runId: "r-context", upstreamTimeoutS: 900, serverEnv: { ...process.env, READ_MAX_LINES: "2000", READ_BUDGET_CHARS: "90000", JOB_INPUT_TOKEN_CAP: "6000000" } }));
     const m = JSON.parse(fs.readFileSync(path.join(r.runDir, "manifest.json"), "utf8")) as { settings: Record<string, string>; timeouts: { upstream_s: number } };
-    assert.deepEqual([m.settings.CONTEXT_MODE, m.settings.READ_MAX_LINES, m.settings.JOB_INPUT_TOKEN_CAP, m.timeouts.upstream_s], ["extended", "2000", "6000000", 900]);
+    assert.deepEqual([m.settings.READ_BUDGET_CHARS, m.settings.READ_MAX_LINES, m.settings.JOB_INPUT_TOKEN_CAP, m.timeouts.upstream_s], ["90000", "2000", "6000000", 900]);
     assert.equal(r.records[0]?.complete, true, "the server accepts the settings and finishes the job");
+    await up.close();
+  });
+
+  it("a bad arm is refused before any spend: bad values, settings not built yet, a proxy timeout not above the server's, and a dry run refuses too", async () => {
+    const up = await stubUpstream();
+    const run = (env: Record<string, string>, over: Partial<EvalOpts> = {}) => runEval(opts(up.url, { only: ["ask-stub"], runId: "r-bad-arm", serverEnv: { ...process.env, ...env }, ...over }));
+    await assert.rejects(run({ JOB_INPUT_TOKEN_CAP: "-5" }), /refused: invalid context settings: JOB_INPUT_TOKEN_CAP="-5"/);
+    await assert.rejects(run({ COMPACT_CHARS: "500000" }), /refused: invalid context settings: COMPACT_CHARS is not supported yet/);
+    await assert.rejects(run({ CONTEXT_MODE: "extended" }), /CONTEXT_MODE=extended is not supported yet/);
+    await assert.rejects(run({}, { upstreamTimeoutS: 100 }), /upstream timeout \(100 s\) must be longer than REQUEST_TIMEOUT_MS \(300 s\)/);
+    await assert.rejects(run({ REQUEST_TIMEOUT_MS: "400000" }), /must be longer than REQUEST_TIMEOUT_MS \(400 s\)/);
+    await assert.rejects(run({ JOB_INPUT_TOKEN_CAP: "-5" }, { dryRun: true }), /refused/);
+    assert.equal(up.seen.length, 0, "nothing was sent upstream");
+    assert.equal(fs.existsSync(path.join(scratch, "runs", "r-bad-arm")), false, "no run folder was created");
+    await up.close();
+  });
+
+  it("setting names are matched without regard to case, and a resume with other settings is refused", async () => {
+    const up = await stubUpstream();
+    const first = await runEval(opts(up.url, { only: ["ask-stub"], runId: "r-resume-guard", serverEnv: { ...process.env, read_max_lines: "1234" } }));
+    const m = JSON.parse(fs.readFileSync(path.join(first.runDir, "manifest.json"), "utf8")) as { settings: Record<string, string>; effective_context: { readMaxLines: number } };
+    assert.deepEqual([m.settings.READ_MAX_LINES, m.effective_context.readMaxLines], ["1234", 1234]);
+    await assert.rejects(runEval(opts(up.url, { only: ["ask-stub"], runId: "r-resume-guard", resume: true, serverEnv: { ...process.env, READ_MAX_LINES: "999" } })), /refused: --resume with different settings/);
+    await assert.rejects(runEval(opts(up.url, { only: ["ask-stub"], runId: "r-resume-guard", resume: true, taskTimeoutS: 7777, serverEnv: { ...process.env, READ_MAX_LINES: "1234" } })), /refused: --resume with different settings/);
+    const again = await runEval(opts(up.url, { only: ["ask-stub"], runId: "r-resume-guard", resume: true, serverEnv: { ...process.env, READ_MAX_LINES: "1234" } }));
+    assert.equal(again.records[0]?.complete, true, "the same settings resume fine");
     await up.close();
   });
 

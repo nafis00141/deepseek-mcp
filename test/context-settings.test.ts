@@ -42,12 +42,22 @@ describe("context settings: loading and validation", () => {
 
   it("until the new compaction modes exist, settings only they would read are refused; MAX_TOKENS must be a number", () => {
     assert.equal(COMPACTION_BUILT, false);
-    for (const e of [{ COMPACT_CHARS: "500000" }, { COMPACT_LOW: "0.7" }, { CONTEXT_MODE: "extended", CONTEXT_TOKENS: "250000", CONTEXT_WINDOW: "1000000" }]) {
+    for (const e of [{ COMPACT_CHARS: "500000" }, { COMPACT_LOW: "0.7" }, { CONTEXT_MODE: "extended" }, { CONTEXT_MODE: "extended", CONTEXT_TOKENS: "250000", CONTEXT_WINDOW: "1000000" }]) {
       assert.throws(() => loadContextSettings(e, 32000), /is not supported yet \(the new compaction modes are not built\)/, JSON.stringify(e));
     }
-    assert.doesNotThrow(() => loadContextSettings({ CONTEXT_MODE: "extended", READ_MAX_LINES: "2000", JOB_INPUT_TOKEN_CAP: "5" }, 32000), "the settings that do something are accepted");
+    assert.doesNotThrow(() => loadContextSettings({ READ_MAX_LINES: "2000", JOB_INPUT_TOKEN_CAP: "5", READ_BUDGET_CHARS: "90000" }, 32000), "the settings that do something are accepted");
+    assert.doesNotThrow(() => loadContextSettings({ CONTEXT_MODE: "legacy" }, 32000), "legacy is the default and is always allowed");
     assert.doesNotThrow(() => loadContextSettings({ COMPACT_CHARS: "220000" }, 32000), "the default value is not a change");
     assert.throws(() => loadContextSettings({}, Number.NaN), /MAX_TOKENS must be a positive number/);
+  });
+
+  it("--check-config says ok for valid settings and refuses bad ones, without starting the server or touching the repo", () => {
+    const root = fs.mkdtempSync(path.join(tmp, "check-"));
+    const run = (extra: Record<string, string>) => spawnSync(process.execPath, [path.join(import.meta.dirname, "..", "src", "server.ts"), "--check-config"], { env: { ...process.env, REPO_ROOT: root, DEEPSEEK_API_KEY: "", ...extra }, encoding: "utf8", timeout: 30000 });
+    const good = run({ JOB_INPUT_TOKEN_CAP: "100" });
+    assert.deepEqual([good.status, good.stdout.trim()], [0, "ok"]);
+    assert.equal(run({ JOB_INPUT_TOKEN_CAP: "oops" }).status, 1);
+    assert.equal(fs.existsSync(path.join(root, "specs")), false);
   });
 
   it("the server refuses to start on a bad setting, before it touches the jobs folder", () => {
@@ -167,6 +177,15 @@ describe("read and result caps", () => {
     assert.match(ext.preview, /row \d+ p{10}$/, "ends on a whole line, not inside it");
     assert.ok(ext.preview.length <= legacy.preview.length);
     assert.equal(summarizeResult({ path: "a", from: 401, to: 800, total_lines: 3000 }), "total_lines=3000 from=401 to=800");
+  });
+
+  it("the extended preview never mistakes an escaped backslash followed by n for a line break", async () => {
+    // text made of "a\\nb" (a literal backslash and n) over and over: no real line break exists in it
+    const flat = "path C:\\new\\notes ".repeat(4000);
+    const out = await withCfg({ contextMode: "extended" }, () => JSON.parse(packResult({ content: flat })) as { preview: string });
+    const legacy = JSON.parse(packResult({ content: flat })) as { preview: string };
+    assert.equal(out.preview, legacy.preview, "with no real line break the preview is not cut back at all");
+    assert.ok(out.preview.length > 40000);
   });
 
   it("the tool result limit is a setting; an oversize result stays valid JSON", async () => {

@@ -206,6 +206,10 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
   const settings = collectSettings(o.serverEnv);
   const effective = effectiveContext(settings);
   o.log(`server settings: ${Object.entries(settings).map(([k, v]) => `${k}=${v}`).join(" ")}; context in effect: ${JSON.stringify(effective)}`);
+  // The proxy must outwait the server's own request timeout, or a slow reply is cut by the proxy and charged as a failure.
+  const upstreamS = o.upstreamTimeoutS ?? DEFAULT_UPSTREAM_TIMEOUT_MS / 1000;
+  const requestMs = Number(settings.REQUEST_TIMEOUT_MS || 300000);
+  if (upstreamS * 1000 <= requestMs) throw new Error(`refused: the proxy's upstream timeout (${upstreamS} s) must be longer than REQUEST_TIMEOUT_MS (${requestMs / 1000} s); pass --upstream-timeout`);
   if (o.dryRun) return { runDir, records: [], planned: tasks.length * o.k, aborted: null };
 
   if (!o.apiKey) throw new Error("DEEPSEEK_API_KEY is not set (environment or eval/.env)");
@@ -230,11 +234,26 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
   const deps = path.join(o.rootDir, "node_modules");
   if (fs.existsSync(deps) && !fs.existsSync(path.join(serverDir, "node_modules"))) fs.symlinkSync(deps, path.join(serverDir, "node_modules"), "junction");
   const serverEntry = path.join(serverDir, "src", "server.ts");
+  // Ask the pinned server copy itself whether it accepts this arm's settings (and each task's own env): the copy that runs may be
+  // older or newer than the code this runner was started from. A copy too old to know --check-config just starts and idles: no verdict.
+  const distinctEnvs = new Map<string, Record<string, string | undefined>>([["", settings]]);
+  for (const t of tasks) if (t.env && Object.keys(t.env).length) distinctEnvs.set(JSON.stringify(t.env), { ...settings, ...Object.fromEntries(Object.entries(t.env).filter(([k]) => TASK_ENV_SETTINGS.includes(k))) });
+  for (const [, env] of distinctEnvs) {
+    const r = spawnSync(process.execPath, [serverEntry, "--check-config"], { env: allowlistEnv({ ...env, REPO_ROOT: runDir }), input: "", encoding: "utf8", timeout: 20000 });
+    if (r.status !== null && r.status !== 0) throw new Error(`refused: the pinned server copy does not accept these settings: ${String(r.stderr).trim().split("\n").pop()}`);
+    if (r.status === null) o.log("  note: the pinned server copy has no --check-config (older code); its settings were not checked by it");
+  }
   // A resumed run may cover other tasks than the first pass did: keep the union in the manifest. Facts about how the run
   // started (lineage, arm, purpose, the working tree's state, the held-out set) are kept from the first pass: a resume may
   // happen on another branch, and that must not change what the run is.
-  type Prev = { tasks?: string[]; started?: string; dirty?: boolean; git_sha?: string; lineage?: string | null; merge_base?: string | null; arm?: string | null; purpose?: string | null; heldout_hash?: string | null; heldout_count?: number | null };
+  type Prev = { tasks?: string[]; started?: string; dirty?: boolean; git_sha?: string; lineage?: string | null; merge_base?: string | null; arm?: string | null; purpose?: string | null; heldout_hash?: string | null; heldout_count?: number | null; settings?: Record<string, string | undefined>; effective_context?: unknown; timeouts?: unknown; task_env?: Record<string, unknown> };
   const prevManifest = readJsonFile<Prev>(path.join(runDir, "manifest.json"));
+  // A resumed run must be the same experiment: other settings or timeouts would mix two arms in one folder.
+  if (o.resume && prevManifest?.settings) {
+    const wanted = { settings, effective_context: effective, timeouts: { task_s: o.taskTimeoutS, upstream_s: upstreamS } };
+    const had = { settings: prevManifest.settings, effective_context: prevManifest.effective_context, timeouts: prevManifest.timeouts };
+    if (JSON.stringify(wanted) !== JSON.stringify(had)) throw new Error("refused: --resume with different settings, effective context or timeouts than the first pass recorded; start a new run id");
+  }
   const lin = prevManifest?.lineage !== undefined ? null : computeLineage(o.gitBin, o.rootDir);
   const held = prevManifest?.heldout_hash !== undefined ? null : heldoutSetHash(path.join(o.rootDir, "eval", "heldout"));
   writeAtomic(
@@ -248,7 +267,7 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
       purpose: prevManifest?.purpose !== undefined ? prevManifest.purpose : o.purpose ?? null,
       heldout_hash: prevManifest?.heldout_hash !== undefined ? prevManifest.heldout_hash : held?.hash ?? null,
       heldout_count: prevManifest?.heldout_count !== undefined ? prevManifest.heldout_count : held?.count ?? null,
-      dirty: prevManifest?.dirty ?? Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, effective_context: effective, task_env: Object.fromEntries(tasks.filter((t) => t.env && Object.keys(t.env).length).map((t) => [labelOf(t), t.env])), caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null }, timeouts: { task_s: o.taskTimeoutS, upstream_s: o.upstreamTimeoutS ?? DEFAULT_UPSTREAM_TIMEOUT_MS / 1000 },
+      dirty: prevManifest?.dirty ?? Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, effective_context: effective, task_env: { ...(prevManifest?.task_env ?? {}), ...Object.fromEntries(tasks.filter((t) => t.env && Object.keys(t.env).length).map((t) => [labelOf(t), t.env])) }, caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null }, timeouts: { task_s: o.taskTimeoutS, upstream_s: upstreamS },
       pricing: o.pricing ?? null, tasks: [...new Set([...(prevManifest?.tasks ?? []), ...tasks.map((t) => labelOf(t))])].sort(), skipped: skipped.map((t) => ({ id: labelOf(t), needs_role: t.needs_role })),
     }, null, 2)
   );

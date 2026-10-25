@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import type { LookResult } from "./lib/looks.ts";
 import { spendLook } from "./lib/looks.ts";
 import { frozenProblem, loadBands } from "./lib/calibration.ts";
-import { CONTEXT_SETTINGS } from "./lib/proc.ts";
+import { ARM_SETTINGS, CONTEXT_SETTINGS } from "./lib/proc.ts";
 import { loadTasks } from "./lib/fixture.ts";
 import { isPrivate } from "./lib/privacy.ts";
 import { nonInferiority, signFlipPValue } from "./lib/stats.ts";
@@ -106,7 +106,9 @@ export interface Comparison {
   exclusion: { base: number; cand: number; ok: boolean };
   /** set when the baseline and candidate manifests differ in a server setting other than the context settings, or in a task env */
   settings_problem: string | null;
-  decision: "KEEP" | "REJECT" | "INCONCLUSIVE";
+  /** REFUSED: the two sides are not comparable (unequal exclusions, a capped arm, unlike settings), so no verdict is given whatever the numbers say */
+  decision: "KEEP" | "REJECT" | "INCONCLUSIVE" | "REFUSED";
+  refusals: string[];
   reasons: string[];
 }
 
@@ -187,15 +189,21 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   }
   const cand = scoreRun(candidateDir);
   const baseRows = bases.flatMap((b) => b.rows);
-  // A filter that matches nothing would give an empty comparison and a quiet INCONCLUSIVE: refuse it instead.
-  const seenRows = [...baseRows, ...cand.rows].filter((r) => !isPrivate(r.split));
-  for (const [flag, wanted, have] of [["--axis", opts.axes, new Set(seenRows.map((r) => r.axis))], ["--exclude-axis", opts.excludeAxes, new Set(seenRows.map((r) => r.axis))], ["--tasks", opts.tasks, new Set(seenRows.map((r) => r.task))]] as const) {
+  // A filter that matches nothing would give an empty comparison and a quiet INCONCLUSIVE: refuse it instead. Runs that were
+  // excluded as incomplete still count as having run (a task that always times out is a task that exists).
+  const seen = [...baseRows, ...cand.rows, ...bases.flatMap((b) => b.excluded), ...cand.excluded].filter((r) => !isPrivate(r.split));
+  const notes: string[] = [];
+  for (const [flag, wanted, have] of [["--axis", opts.axes, new Set(seen.map((r) => r.axis))], ["--tasks", opts.tasks, new Set(seen.map((r) => r.task))]] as const) {
     const missing = (wanted ?? []).filter((w) => !have.has(w));
     if (missing.length) throw new Error(`${flag}: no dev run has ${missing.join(", ")}`);
   }
+  // Excluding an axis nobody ran is harmless (a guard run on a set that has none of it): say so, do not stop.
+  const noAxis = (opts.excludeAxes ?? []).filter((w) => !new Set(seen.map((r) => r.axis)).has(w));
+  if (noAxis.length) notes.push(`--exclude-axis: no dev run has ${noAxis.join(", ")}; nothing was excluded for it`);
   // Only dev drives gains and losses and only held-out is the regression guard; confirm and reserve rows belong to neither.
-  const devOf = (rows: RunRow[]): RunRow[] =>
-    rows.filter((r) => !isPrivate(r.split) && (!opts.tier || r.tier === opts.tier) && (!opts.axes || (r.axis !== null && opts.axes.includes(r.axis))) && !(r.axis !== null && opts.excludeAxes?.includes(r.axis)) && (!opts.tasks || opts.tasks.includes(r.task)));
+  const inScope = (r: { split: string; tier: Tier; axis: string | null; task: string }): boolean =>
+    !isPrivate(r.split) && (!opts.tier || r.tier === opts.tier) && (!opts.axes || (r.axis !== null && opts.axes.includes(r.axis))) && !(r.axis !== null && opts.excludeAxes?.includes(r.axis)) && (!opts.tasks || opts.tasks.includes(r.task));
+  const devOf = (rows: RunRow[]): RunRow[] => rows.filter(inScope);
   const heldOf = (rows: RunRow[]): RunRow[] => (opts.devOnly || opts.tier ? [] : rows.filter((r) => r.split === "heldout"));
   const bT = byTask(devOf(baseRows));
   const cT = byTask(devOf(cand.rows));
@@ -275,45 +283,63 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
     reasons.push(`${heldout_problem}; this cannot be KEEP`);
     if (decision === "KEEP") decision = "INCONCLUSIVE";
   }
-  // A side that loses more runs to timeouts or infrastructure than the other is flattered by it: refuse a verdict across a wide gap.
+  // Comparability. A side that loses more runs to timeouts or infrastructure than the other is flattered by it; an arm that was
+  // stopped by a cost cap is incomplete; arms must differ only in what the comparison is about. Any of these refuses the verdict,
+  // whatever the numbers say: a REJECT or a loss count from unlike runs would be as misleading as a KEEP.
+  const refusals: string[] = [];
   const filtered = Boolean(opts.devOnly || opts.tier || opts.axes || opts.excludeAxes || opts.tasks);
-  const keptTasks = new Set(devOf([...baseRows, ...cand.rows]).map((r) => r.task));
-  const rate = (excluded: { task: string; split: string }[], rows: RunRow[]): number => {
-    const ex = excluded.filter((e) => !isPrivate(e.split) && (!filtered || keptTasks.has(e.task))).length;
+  const rate = (excluded: { task: string; split: string; tier: Tier; axis: string | null }[], rows: RunRow[]): number => {
+    const ex = excluded.filter((e) => (filtered ? inScope(e) : !isPrivate(e.split))).length;
     const n = (filtered ? devOf(rows) : rows.filter((r) => !isPrivate(r.split))).length;
     return ex + n > 0 ? r3(ex / (ex + n)) : 0;
   };
   const exBase = rate(bases.flatMap((b) => b.excluded), baseRows);
   const exCand = rate(cand.excluded, cand.rows);
   const exclusion = { base: exBase, cand: exCand, ok: Math.abs(exBase - exCand) <= 0.1 };
-  if (!exclusion.ok) {
-    reasons.push(`runs excluded as incomplete: ${Math.round(exBase * 100)}% of baseline runs against ${Math.round(exCand * 100)}% of candidate runs; the gap is over 10 points, so this cannot be KEEP`);
-    if (decision === "KEEP") decision = "INCONCLUSIVE";
+  if (!exclusion.ok) refusals.push(`runs excluded as incomplete: ${Math.round(exBase * 100)}% of baseline runs against ${Math.round(exCand * 100)}% of candidate runs; the gap is over 10 points`);
+  for (const [label, s] of [["a baseline", bases], ["the candidate", [cand]]] as const) {
+    if (s.some((x) => x.excluded.some((e) => e.status === "capped"))) refusals.push(`${label} has runs stopped by the cost cap, so that arm is incomplete`);
   }
-  // Arms must differ only in what the comparison is about: compare the recorded server settings and task env.
-  let settings_problem: string | null = null;
-  const manifestOf = (dir: string): { settings?: Record<string, string>; task_env?: unknown } | null => {
+  type Manifest = { settings?: Record<string, string>; effective_context?: Record<string, unknown>; task_env?: Record<string, unknown>; tasks?: string[]; timeouts?: unknown; server_hash?: string };
+  const manifestOf = (dir: string): Manifest | null => {
     try {
-      return JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8")) as { settings?: Record<string, string>; task_env?: unknown };
+      return JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8")) as Manifest;
     } catch {
       return null;
     }
   };
+  // Effective values of the two context settings that must be identical in every arm (so "unset" equals "the default").
+  const EFFECTIVE: Record<string, string> = { JOB_INPUT_TOKEN_CAP: "jobInputTokenCap", MAX_REQUEST_BYTES: "maxRequestBytes" };
+  const diffs = new Set<string>();
   const cm = manifestOf(candidateDir);
-  if (cm?.settings) {
-    const diffs = new Set<string>();
-    for (const dir of baselineDirs) {
-      const bm = manifestOf(dir);
-      if (!bm?.settings) continue;
-      for (const k of new Set([...Object.keys(bm.settings), ...Object.keys(cm.settings)])) if (!CONTEXT_SETTINGS.includes(k) && bm.settings[k] !== cm.settings[k]) diffs.add(k);
-      if (JSON.stringify(bm.task_env ?? {}) !== JSON.stringify(cm.task_env ?? {})) diffs.add("task env");
+  if (!cm) notes.push("the candidate has no manifest: settings and timeouts were not compared");
+  for (const dir of baselineDirs) {
+    const bm = manifestOf(dir);
+    if (!bm || !cm) {
+      if (!bm) notes.push(`${path.basename(dir)} has no manifest: settings and timeouts were not compared`);
+      continue;
     }
-    if (diffs.size) settings_problem = `the baseline and candidate runs differ in ${[...diffs].join(", ")}, which are not context settings: the comparison is not like for like`;
+    if (opts.devOnly && bm.server_hash && cm.server_hash && bm.server_hash !== cm.server_hash) diffs.add("server code (a screening comparison is for settings of identical code)");
+    if (bm.settings && cm.settings) {
+      for (const k of new Set([...Object.keys(bm.settings), ...Object.keys(cm.settings)])) {
+        if (opts.devOnly && ARM_SETTINGS.includes(k)) continue; // these are what an arm changes
+        if (!opts.devOnly && CONTEXT_SETTINGS.includes(k)) continue; // a code candidate is judged by its code; its settings are those of the run
+        const field = EFFECTIVE[k];
+        const a = field && bm.effective_context ? String(bm.effective_context[field]) : bm.settings[k];
+        const b = field && cm.effective_context ? String(cm.effective_context[field]) : cm.settings[k];
+        if (a !== b) diffs.add(k);
+      }
+    }
+    if (bm.timeouts && cm.timeouts && JSON.stringify(bm.timeouts) !== JSON.stringify(cm.timeouts)) diffs.add("timeouts");
+    const both = new Set((bm.tasks ?? []).filter((t) => (cm.tasks ?? []).includes(t)));
+    for (const t of both) if (JSON.stringify(bm.task_env?.[t] ?? null) !== JSON.stringify(cm.task_env?.[t] ?? null)) diffs.add(`env of task ${t}`);
   }
-  if (settings_problem) {
-    reasons.push(`${settings_problem}; this cannot be KEEP`);
-    if (decision === "KEEP") decision = "INCONCLUSIVE";
-  }
+  const settings_problem = diffs.size ? `the baseline and candidate runs differ in ${[...diffs].join(", ")}: the comparison is not like for like` : null;
+  if (settings_problem) refusals.push(settings_problem);
+  if (refusals.length) {
+    decision = "REFUSED";
+    reasons.push(...refusals.map((r) => `REFUSED: ${r}`), ...notes);
+  } else reasons.push(...notes);
   // The final statistic is paired over tasks: repeats of one task are not independent, so the unit is the per-task change.
   let final: FinalStats | null = null;
   if (opts.final) {
@@ -349,7 +375,7 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   if (token_ratio !== null && token_ratio > 1.25) reasons.push(`cost warning: mean tokens per run rose ${Math.round((token_ratio - 1) * 100)}%`);
   const skipped = dev.filter((d) => !d.counted);
   if (skipped.length) reasons.push(`not counted: ${skipped.map((d) => `${d.task} (${d.verdict} on a ${d.band} task)`).join(", ")}`);
-  return { baselines: bases.map((b) => b.run_id), candidate: cand.run_id, opts, dev, gains, losses, net, net_clean, heldout, overall: { base: aggregate(usedBase), cand: aggregate(usedCand) }, token_ratio, cost_ratio, exclusion, settings_problem, decision, reasons, heldout_problem, final };
+  return { baselines: bases.map((b) => b.run_id), candidate: cand.run_id, opts, dev, gains, losses, net, net_clean, heldout, overall: { base: aggregate(usedBase), cand: aggregate(usedCand) }, token_ratio, cost_ratio, exclusion, settings_problem, decision, refusals, reasons, heldout_problem, final };
 }
 
 const pct = (s: Stat | null): string => (s ? `${Math.round(s.mean * 100)}%` : "-");

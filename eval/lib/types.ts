@@ -102,4 +102,6 @@ export interface UsageStats {
   capped: boolean;
   /** upstream calls that timed out or failed with no usage reply; their cost is an estimate from the request size (they may still be billed) */
   upstream_failures?: number;
+  /** estimated cost of upstream calls that timed out; kept apart from the measured `cost` so the cost rule sees only measured spend, but it counts toward --max-cost */
+  estimated_cost?: number;
 }

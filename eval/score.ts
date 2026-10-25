@@ -47,6 +47,8 @@ export interface RunRow {
 }
 
 export interface Excluded {
+  tier: Tier;
+  axis: string | null;
   task: string;
   k: number;
   split: string;
@@ -204,7 +206,7 @@ export function scoreRun(runDir: string): ScoreResult {
   const recs = findRecords(runDir).sort((a, b) => a.rec.split.localeCompare(b.rec.split) || a.rec.task.localeCompare(b.rec.task) || a.rec.k - b.rec.k);
   for (const { rec, dir } of recs) {
     if (!rec.complete) {
-      excluded.push({ task: rec.task, k: rec.k, split: rec.split, status: rec.status, reason: rec.error ?? (rec.status === "capped" ? "proxy cap reached" : rec.status === "infra" ? "infrastructure failure inside the job" : rec.status) });
+      excluded.push({ tier: tierOf(rec), axis: rec.axis ?? null, task: rec.task, k: rec.k, split: rec.split, status: rec.status, reason: rec.error ?? (rec.status === "capped" ? "proxy cap reached" : rec.status === "infra" ? "infrastructure failure inside the job" : rec.status) });
       continue;
     }
     rows.push(scoreRecord(rec, rec.family ?? "unknown", dir));

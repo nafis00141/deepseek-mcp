@@ -45,9 +45,9 @@ export function costOf(pricing: Pricing | undefined, prompt: number, hit: number
 }
 
 export async function startProxy(opts: ProxyOpts): Promise<Proxy> {
-  const sessions = new Map<string, { stats: UsageStats; fail: number[]; maxTokens?: number | undefined }>();
+  const sessions = new Map<string, { stats: UsageStats; fail: number[]; maxTokens?: number | undefined; lastPrompt?: number; lastHitShare?: number }>();
   const totals = empty();
-  const overCap = (): boolean => (opts.maxTokens !== undefined && totals.prompt + totals.completion >= opts.maxTokens) || (opts.maxCost !== undefined && totals.cost >= opts.maxCost);
+  const overCap = (): boolean => (opts.maxTokens !== undefined && totals.prompt + totals.completion >= opts.maxTokens) || (opts.maxCost !== undefined && totals.cost + (totals.estimated_cost ?? 0) >= opts.maxCost);
 
   const server = http.createServer((req, res) => {
     const reply = (status: number, body: string): void => {
@@ -95,6 +95,8 @@ export async function startProxy(opts: ProxyOpts): Promise<Proxy> {
               const hit = u.prompt_cache_hit_tokens ?? 0;
               const reasoning = u.completion_tokens_details?.reasoning_tokens ?? 0;
               const cost = costOf(opts.pricing, prompt, hit, completion);
+              s.lastPrompt = prompt;
+              s.lastHitShare = prompt > 0 ? hit / prompt : 0;
               for (const t of [s.stats, totals]) {
                 t.prompt += prompt;
                 t.completion += completion;
@@ -108,11 +110,15 @@ export async function startProxy(opts: ProxyOpts): Promise<Proxy> {
           }
           reply(up.status, text);
         } catch (e) {
-          // No usage came back, but a timed-out request may still be billed: charge an estimate (about 4 bytes a token, all cache misses) against the cap.
-          const est = costOf(opts.pricing, Math.ceil(Buffer.byteLength(body) / 4), 0, 0);
+          // A request that timed out may still have been billed although no usage came back: count it, and charge an estimate against
+          // --max-cost (not into the measured cost). The estimate is the session's last prompt size and cache share, or about 8 bytes a token
+          // (tool text is JSON inside JSON) as all misses. A refused connection reached nothing and is not charged.
+          const timedOut = (e as Error).name === "TimeoutError" || /timed out|timeout/i.test((e as Error).message);
+          const tokens = s.lastPrompt ?? Math.ceil(Buffer.byteLength(body) / 8);
+          const est = timedOut ? costOf(opts.pricing, tokens, tokens * (s.lastHitShare ?? 0), 0) : 0;
           for (const t of [s.stats, totals]) {
             t.upstream_failures = (t.upstream_failures ?? 0) + 1;
-            t.cost += est;
+            t.estimated_cost = (t.estimated_cost ?? 0) + est;
           }
           reply(502, JSON.stringify({ error: `proxy upstream failure: ${(e as Error).message.slice(0, 200)}` }));
         }
