@@ -1,5 +1,7 @@
 # Plan: harder evals
 
+Status: steps 1-5 (tooling) built; steps 6-7 (authoring, calibration) not started. See `Specs/STATUS.md`.
+
 Implements `Specs/harder-evals/spec.md` (v2).
 
 ## Approach
@@ -24,15 +26,16 @@ Existing (verified present):
 - `eval/loop.md`, `README.md`.
 
 New:
-- `eval/calibrate.ts`, `eval/chance.ts`, `eval/frozen.json` (generated), `eval/tasks/<id>/calibration.json`.
-- `test/eval-calibrate.test.ts`.
+- `eval/calibrate.ts`, `eval/lib/calibration.ts`, `eval/chance.ts`, `eval/calibration.json` and `eval/frozen.json` (generated).
+- `test/eval-calibrate.test.ts` (built: bands, calibrate, compare rules, chance check).
 - 12 hard dev task folders under `eval/tasks/`; hard held-out folders under `eval/reserve/`.
 
 ## Data and API changes
 
 - `task.json`: `tier`, `axis`, `author`, `authored_on`, `authored_after_result`, `authored_after_run`.
 - `manifest.json`: `arm`, `purpose` (both required on live runs).
-- `calibration.json`: `{ band, pooled_hidden_pass, runs, run_ids, retunes[] }`; `frozen.json`: `{ task_set_hash, frozen_at }`.
+- `eval/calibration.json` (one file, as built): `{ rounds: [{ round, at, run_ids, task_set_hash, note }], tasks: { <id>: { runs, pass_rate, band } } }`; `eval/frozen.json`: `{ task_set_hash, frozen_at, round, tasks }`. (The draft had one `calibration.json` per task folder; one file keeps the retune history in one place and out of the task hash.)
+- `outcome.json` of a hard task's decoys: `kind` (added during build).
 - No change to MCP tools or the server.
 
 ## Test strategy

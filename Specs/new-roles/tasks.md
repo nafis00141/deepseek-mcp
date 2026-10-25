@@ -1,5 +1,9 @@
 # Tasks: new handoff roles
 
+## Status
+
+T1-T12 done and merged on `master`. Changed after the first measurement (`roles-1`): the `do` prompt has a partial path for tasks only partly out of reach, and research citations are repaired inside the job. Not done: `fix-after-finding` and `fix-refuses-handmade-branch` were not rerun after those two edits. See "Measured pass rates" below and `Specs/STATUS.md`.
+
 Order matters as marked. "Done when" is checkable. Spec ids are AC-n in `spec.md` (v2).
 
 ## T1. Deny writes to `specs/.jobs`

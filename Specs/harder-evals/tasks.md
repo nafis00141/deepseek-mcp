@@ -1,5 +1,22 @@
 # Tasks: harder evals
 
+## Status
+
+| task | state |
+|---|---|
+| T1 metadata | done (df6a586) |
+| T2 required `--arm`/`--purpose` | done (df6a586); the flags themselves existed from `fresh-holdout-exam` |
+| T3 tier reporting | done (df6a586); band column added in T6 |
+| T4 two decoys | done (df6a586); decoys also declare `kind` |
+| T5 calibrate | done (972f9c4) |
+| T6 band/provenance compare | done (972f9c4) |
+| T7 chance check | done (972f9c4); ordered pairs, dev-only rule |
+| T8-T15 twelve hard dev tasks | not started |
+| T16 hard reserve tasks | not started |
+| T17 calibrate and freeze | not started; spends money, ask first |
+| T18 cost and speed | not started |
+| T19 docs | not started |
+
 Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.md` (v2).
 
 ## T1. Task metadata

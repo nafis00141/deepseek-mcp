@@ -1,5 +1,9 @@
 # Tasks: a fresh held-out exam and a protected confirmation set
 
+## Status
+
+T1-T14 done on `master`. No live confirmation run has been made (owner's call, it spends money). The four hard reserve tasks that `Specs/harder-evals/` T16 adds are not written yet. See `Specs/STATUS.md`.
+
 Order matters as marked. "Done when" is checkable. Spec ids are AC-n in `spec.md` (v2).
 
 ## T1. One privacy rule
