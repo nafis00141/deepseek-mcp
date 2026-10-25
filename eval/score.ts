@@ -4,11 +4,12 @@
  *
  *   node eval/score.ts <run-id | path to run folder>
  *
- * Held-out tasks appear only as one aggregate; their per-task rows go to heldout-private/scores.json.
+ * Private splits (held-out, confirm, reserve) appear only as one aggregate row each; their per-task rows go to private/scores.json.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isPrivate } from "./lib/privacy.ts";
 import type { RunRecord } from "./run.ts";
 
 export interface RunRow {
@@ -235,41 +236,41 @@ export function renderReport(r: ScoreResult): string {
   const m = (r.manifest ?? {}) as { settings?: Record<string, string>; server_hash?: string; k?: number; caps?: { max_tokens?: number | null; max_cost?: number | null }; skipped?: { id: string; needs_role: string }[]; dirty?: boolean };
   const out: string[] = [`# Eval report - ${r.run_id}`, ""];
   if (r.manifest) out.push(`model ${m.settings?.DEEPSEEK_MODEL ?? "?"}, effort ${m.settings?.DEEPSEEK_EFFORT ?? "default"}, k=${m.k ?? "?"}, server ${String(m.server_hash ?? "?").slice(0, 10)}${m.dirty ? " (dirty tree)" : ""}`, "");
-  out.push("## Summary", "", table(HEAD, [aggRow("overall", r.overall), ...Object.entries(r.by_split).map(([s, a]) => aggRow(s === "heldout" ? "held-out (aggregate only)" : s, a))]), "");
+  out.push("## Summary", "", table(HEAD, [aggRow("overall", r.overall), ...Object.entries(r.by_split).map(([s, a]) => aggRow(isPrivate(s) ? `${s === "heldout" ? "held-out" : s} (aggregate only)` : s, a))]), "");
   out.push("`hidden pass` is the true correctness. `false accept` = the gate said done/noop but a hidden check failed. `false reject` = the gate result differed from the expected one while every hidden check passed. `first try` = correct with no repair and no fix round. `compliance` = the task's instruction-compliance checks.", "");
   out.push("## By family", "", table(HEAD, Object.entries(r.by_family).map(([f, a]) => aggRow(f, a))), "");
-  const dev = r.tasks.filter((t) => t.split !== "heldout");
+  const dev = r.tasks.filter((t) => !isPrivate(t.split));
   out.push("## Tasks (dev)", "", table(["task", "family", ...HEAD.slice(1), "flaky"], dev.map((t) => [t.task, t.family, ...aggRow("", t).slice(1), t.flaky ? "yes" : ""])), "");
   const section = (title: string, items: ScoreResult["false_accepts"]): void => {
-    const shown = items.filter((i) => i.split !== "heldout");
+    const shown = items.filter((i) => !isPrivate(i.split));
     const hiddenCount = items.length - shown.length;
     out.push(`## ${title}`, "");
     out.push(shown.length ? shown.map((i) => `- ${i.task}#${i.k}: failing checks ${i.failing_checks.join(", ") || "(none recorded)"}`).join("\n") : "none", ...(hiddenCount ? [``, `(${hiddenCount} more in held-out tasks, not itemised)`] : []), "");
   };
   section("False accepts", r.false_accepts);
   section("False rejects", r.false_rejects);
-  const oos = r.rows.filter((x) => x.split !== "heldout" && (x.oos_writes > 0 || x.denied_reads > 0));
+  const oos = r.rows.filter((x) => !isPrivate(x.split) && (x.oos_writes > 0 || x.denied_reads > 0));
   out.push("## Refused tool calls", "", oos.length ? oos.map((x) => `- ${x.task}#${x.k}: ${x.oos_writes} write(s), ${x.denied_reads} read(s) refused`).join("\n") : "none", "");
   const noTrace = r.rows.filter((x) => !x.trace_found).length;
   if (noTrace) out.push(`Note: ${noTrace} run(s) have no trace file, so their repairs, turns and refused calls read as 0.`, "");
-  out.push("## Excluded runs (not scored)", "", r.excluded.length ? r.excluded.filter((e) => e.split !== "heldout").map((e) => `- ${e.task}#${e.k}: ${e.status} - ${e.reason}`).join("\n") || "none (held-out only)" : "none", "");
+  out.push("## Excluded runs (not scored)", "", r.excluded.length ? r.excluded.filter((e) => !isPrivate(e.split)).map((e) => `- ${e.task}#${e.k}: ${e.status} - ${e.reason}`).join("\n") || "none (held-out only)" : "none", "");
   if (m.skipped?.length) out.push("## Not applicable (role missing)", "", m.skipped.map((s) => `- ${s.id}: needs role "${s.needs_role}"`).join("\n"), "");
   return out.join("\n");
 }
 
-/** Write scores.json and report.md (dev + aggregate) and heldout-private/scores.json (everything). */
+/** Write scores.json and report.md (public splits itemised, private splits as aggregates) and private/scores.json (everything). */
 export function writeScores(runDir: string): ScoreResult {
   const r = scoreRun(runDir);
+  const pub = <T extends { split: string }>(items: T[]): T[] => items.filter((x) => !isPrivate(x.split));
   const visible = {
     run_id: r.run_id, overall: r.overall, by_split: r.by_split, by_family: r.by_family,
-    tasks: r.tasks.filter((t) => t.split !== "heldout"), rows: r.rows.filter((x) => x.split !== "heldout"),
-    excluded: r.excluded.filter((e) => e.split !== "heldout"), false_accepts: r.false_accepts.filter((x) => x.split !== "heldout"), false_rejects: r.false_rejects.filter((x) => x.split !== "heldout"),
+    tasks: pub(r.tasks), rows: pub(r.rows), excluded: pub(r.excluded), false_accepts: pub(r.false_accepts), false_rejects: pub(r.false_rejects),
   };
   fs.writeFileSync(path.join(runDir, "scores.json"), JSON.stringify(visible, null, 2) + "\n");
   fs.writeFileSync(path.join(runDir, "report.md"), renderReport(r) + "\n");
-  if (r.rows.some((x) => x.split === "heldout") || r.excluded.some((e) => e.split === "heldout")) {
-    fs.mkdirSync(path.join(runDir, "heldout-private"), { recursive: true });
-    fs.writeFileSync(path.join(runDir, "heldout-private", "scores.json"), JSON.stringify(r, null, 2) + "\n");
+  if (r.rows.some((x) => isPrivate(x.split)) || r.excluded.some((e) => isPrivate(e.split))) {
+    fs.mkdirSync(path.join(runDir, "private"), { recursive: true });
+    fs.writeFileSync(path.join(runDir, "private", "scores.json"), JSON.stringify(r, null, 2) + "\n");
   }
   return r;
 }

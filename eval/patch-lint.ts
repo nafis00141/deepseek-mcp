@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadTasks } from "./lib/fixture.ts";
+import { isPrivate } from "./lib/privacy.ts";
 
 export interface Forbidden {
   term: string;
@@ -28,8 +29,8 @@ function listFiles(dir: string, base = dir): string[] {
 /** Terms that tie a patch to a particular task. */
 export function forbiddenTerms(taskRoots: string[]): Forbidden[] {
   const out: Forbidden[] = [];
-  for (const t of loadTasks(taskRoots, ["dev", "heldout"])) {
-    const heldout = t.split === "heldout";
+  for (const t of loadTasks(taskRoots, ["dev", "heldout", "confirm", "reserve"])) {
+    const heldout = isPrivate(t.split);
     out.push({ term: t.id.toLowerCase(), kind: "task id", heldout });
     for (const f of listFiles(path.join(t.dir, "repo"))) {
       if (f.length >= 8 && !GENERIC_PATHS.has(f.toLowerCase())) out.push({ term: f.toLowerCase(), kind: "fixture path", heldout });
@@ -77,7 +78,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.exit(1);
   }
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const hits = lintPatch(fs.readFileSync(file, "utf8"), forbiddenTerms([path.join(here, "tasks"), path.join(here, "heldout")]));
+  const hits = lintPatch(fs.readFileSync(file, "utf8"), forbiddenTerms(["tasks", "heldout", "confirm", "reserve"].map((d) => path.join(here, d))));
   if (hits.length) {
     for (const h of hits.slice(0, 20)) console.error(`line ${h.line}: mentions a ${h.kind}: ${h.term}`);
     console.error("rejected: a harness patch must be general, not tied to an eval task");

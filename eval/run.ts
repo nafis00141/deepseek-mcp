@@ -17,6 +17,7 @@ import { runChecks } from "./lib/checks.ts";
 import { loadTasks, makeRepo, removeDir, runSetup } from "./lib/fixture.ts";
 import { McpClient } from "./lib/mcp.ts";
 import { SERVER_SETTINGS, allowlistEnv } from "./lib/proc.ts";
+import { isPrivate, labelOf, runSubdir } from "./lib/privacy.ts";
 import { startProxy } from "./lib/proxy.ts";
 import { validateTasks } from "./lib/validate.ts";
 import type { LoadedTask, Pricing, Split, StepResult, UsageStats } from "./lib/types.ts";
@@ -142,8 +143,8 @@ const emptyUsage = (): UsageStats => ({ requests: 0, prompt: 0, completion: 0, r
 function describePlan(o: EvalOpts, tasks: LoadedTask[], skipped: LoadedTask[]): void {
   const n = tasks.length * o.k;
   o.log(`run ${o.runId}: ${tasks.length} task(s) x k=${o.k} = ${n} run(s), splits ${o.splits.join("+")}, parallel ${o.parallel}`);
-  for (const t of tasks) o.log(`  ${t.id}  [${t.split}] ${t.family}: ${t.title} (${t.steps.map((s) => s.role).join(" > ")})`);
-  for (const t of skipped) o.log(`  N/A ${t.id}: needs role "${t.needs_role}"`);
+  for (const t of tasks) o.log(isPrivate(t.split) ? `  ${labelOf(t)}  [${t.split}] (private)` : `  ${t.id}  [${t.split}] ${t.family}: ${t.title} (${t.steps.map((s) => s.role).join(" > ")})`);
+  for (const t of skipped) o.log(`  N/A ${labelOf(t)}: needs role "${t.needs_role}"`);
   const pilot = readRecordJson(path.join(o.runsDir, "last-usage.json"));
   if (pilot?.runs) {
     const tokens = Math.round(pilot.mean_tokens * n);
@@ -200,7 +201,7 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
       run_id: o.runId, started: prevManifest?.started ?? new Date().toISOString(), node: process.version, k: o.k, splits: o.splits,
       git_sha: spawnSync(o.gitBin, ["rev-parse", "HEAD"], { cwd: o.rootDir, encoding: "utf8" }).stdout.trim(),
       dirty: Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null },
-      pricing: o.pricing ?? null, tasks: [...new Set([...(prevManifest?.tasks ?? []), ...tasks.map((t) => t.id)])].sort(), skipped: skipped.map((t) => ({ id: t.id, needs_role: t.needs_role })),
+      pricing: o.pricing ?? null, tasks: [...new Set([...(prevManifest?.tasks ?? []), ...tasks.map((t) => labelOf(t))])].sort(), skipped: skipped.map((t) => ({ id: labelOf(t), needs_role: t.needs_role })),
     }, null, 2)
   );
 
@@ -209,11 +210,11 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
   let aborted: string | null = null;
 
   const runOne = async (task: LoadedTask, k: number): Promise<RunRecord> => {
-    const outDir = path.join(runDir, task.split === "heldout" ? "heldout-private" : ".", task.id, String(k));
+    const outDir = path.join(runDir, runSubdir(task.split), task.id, String(k));
     const recFile = path.join(outDir, "checks.json");
     const prior = o.resume ? readRecord(recFile) : null;
     if (prior?.complete) {
-      o.log(`  skip ${task.id}#${k} (complete)`);
+      o.log(`  skip ${labelOf(task)}#${k} (complete)`);
       return prior;
     }
     fs.mkdirSync(outDir, { recursive: true });
@@ -274,7 +275,7 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
     };
     writeAtomic(recFile, JSON.stringify(rec, null, 2));
     removeDir(fx.tmp);
-    o.log(`  ${task.id}#${k}: ${status}${last ? ` gate=${last.status}` : ""} checks ${checks.filter((c) => c.pass).length}/${checks.length} tokens ${sess.stats.prompt + sess.stats.completion}`);
+    o.log(`  ${labelOf(task)}#${k}: ${status}${last ? ` gate=${last.status}` : ""} checks ${checks.filter((c) => c.pass).length}/${checks.length} tokens ${sess.stats.prompt + sess.stats.completion}`);
     return rec;
   };
 

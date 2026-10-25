@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { removeDir } from "../eval/lib/fixture.ts";
+import { isPrivate, labelOf, privateLabel, runSubdir } from "../eval/lib/privacy.ts";
 import { compareRuns, renderComparison } from "../eval/compare.ts";
 import { renderReport, scoreRun, writeScores } from "../eval/score.ts";
 import type { RunRecord } from "../eval/run.ts";
@@ -31,7 +32,7 @@ function mkRun(id: string, specs: Spec[]): string {
   fs.writeFileSync(path.join(runDir, "manifest.json"), JSON.stringify({ settings: { DEEPSEEK_MODEL: "deepseek-flash" }, k: 2, server_hash: "abcdef0123456789", skipped: [{ id: "free-form", needs_role: "do" }] }));
   for (const s of specs) {
     const split = s.split ?? "dev";
-    const dir = path.join(runDir, split === "heldout" ? "heldout-private" : ".", s.task, String(s.k));
+    const dir = path.join(runDir, split === "heldout" ? "private/heldout" : ".", s.task, String(s.k));
     fs.mkdirSync(dir, { recursive: true });
     const status = s.status ?? "ok";
     const rec: RunRecord = {
@@ -115,6 +116,51 @@ describe("scoring", () => {
   });
 });
 
+describe("private splits", () => {
+  const mkSplit = (id: string, split: "heldout" | "confirm" | "reserve", task: string, base: string): string => {
+    const runDir = mkRun(id, [{ task: "pub-task", k: 1, gate: "done", checks: [["c", false, true]], events: [turn] }]);
+    const dir = path.join(runDir, base, task, "1");
+    fs.mkdirSync(dir, { recursive: true });
+    const rec: RunRecord = {
+      complete: true, status: "ok", task, k: 1, family: "code", split, expect: { gate: "done" }, gate_status: "done",
+      steps: [{ step: 1, role: "impl", job_id: "bbbbbbbb", status: "done", infra: false }],
+      checks: [{ name: `${task}-check`, type: "x", pass: false, detail: "d", compliance: false }],
+      usage: { requests: 1, prompt: 10, completion: 5, reasoning: 0, cache_hit: 0, cost: 0, capped: false }, wall_s: 1,
+    };
+    fs.writeFileSync(path.join(dir, "checks.json"), JSON.stringify(rec));
+    return runDir;
+  };
+
+  for (const split of ["heldout", "confirm", "reserve"] as const) {
+    it(`a ${split} task never appears by name in the report or scores, only as an aggregate; details go to private/`, () => {
+      const task = `zz-${split}-task`;
+      const runDir = mkSplit(`run-priv-${split}`, split, task, `private/${split}`);
+      const r = writeScores(runDir);
+      const visible = [fs.readFileSync(path.join(runDir, "report.md"), "utf8"), fs.readFileSync(path.join(runDir, "scores.json"), "utf8")].join("\n");
+      assert.ok(!visible.includes(task) && !visible.includes(`${task}-check`), "no private name in public output");
+      assert.match(visible, new RegExp(`${split === "heldout" ? "held-out" : split} \\(aggregate only\\)`));
+      assert.equal(r.by_split[split]?.runs, 1);
+      const priv = JSON.parse(fs.readFileSync(path.join(runDir, "private", "scores.json"), "utf8")) as { rows: { task: string }[] };
+      assert.ok(priv.rows.some((x) => x.task === task));
+    });
+  }
+
+  it("still reads runs written under the old heldout-private/ folder", () => {
+    const runDir = mkSplit("run-legacy", "heldout", "zz-legacy-task", "heldout-private");
+    assert.ok(scoreRun(runDir).rows.some((x) => x.task === "zz-legacy-task"));
+  });
+
+  it("the privacy helpers: which splits are private, where details live, and a stable non-reversible label", () => {
+    assert.deepEqual(["dev", "heldout", "confirm", "reserve"].map(isPrivate), [false, true, true, true]);
+    assert.deepEqual(["dev", "heldout", "reserve"].map(runSubdir), [".", "private/heldout", "private/reserve"]);
+    assert.equal(privateLabel("some-task"), privateLabel("some-task"));
+    assert.match(privateLabel("some-task"), /^p-[0-9a-f]{8}$/);
+    assert.ok(!privateLabel("some-task").includes("some-task"));
+    assert.equal(labelOf({ id: "pub", split: "dev" }), "pub");
+    assert.equal(labelOf({ id: "sec", split: "confirm" }), privateLabel("sec"));
+  });
+});
+
 describe("compare", () => {
   /** n runs of one task; the first `pass` of them pass their single hidden check. */
   const runsOf = (task: string, n: number, pass: number, split: "dev" | "heldout" = "dev"): Spec[] =>
@@ -167,7 +213,7 @@ describe("report and files", () => {
     const visible = fs.readFileSync(path.join(runDir, "scores.json"), "utf8");
     assert.ok(!visible.includes("h-secret") && !visible.includes("planted-bug-found"));
     assert.ok(JSON.parse(visible).by_split.heldout.runs === 1, "held-out aggregate is still there");
-    const priv = JSON.parse(fs.readFileSync(path.join(runDir, "heldout-private", "scores.json"), "utf8")) as { rows: { task: string }[] };
+    const priv = JSON.parse(fs.readFileSync(path.join(runDir, "private", "scores.json"), "utf8")) as { rows: { task: string }[] };
     assert.ok(priv.rows.some((x) => x.task === "h-secret"));
     assert.match(report, /Not applicable[\s\S]*free-form: needs role "do"/);
     assert.equal(`${renderReport(r)}\n`, report);
@@ -176,9 +222,9 @@ describe("report and files", () => {
   it("is deterministic: scoring the same folder twice gives identical files", () => {
     const runDir = path.join(root, "run-a");
     writeScores(runDir);
-    const first = ["scores.json", "report.md", path.join("heldout-private", "scores.json")].map((f) => fs.readFileSync(path.join(runDir, f), "utf8"));
+    const first = ["scores.json", "report.md", path.join("private", "scores.json")].map((f) => fs.readFileSync(path.join(runDir, f), "utf8"));
     writeScores(runDir);
-    const second = ["scores.json", "report.md", path.join("heldout-private", "scores.json")].map((f) => fs.readFileSync(path.join(runDir, f), "utf8"));
+    const second = ["scores.json", "report.md", path.join("private", "scores.json")].map((f) => fs.readFileSync(path.join(runDir, f), "utf8"));
     assert.deepEqual(second, first);
   });
 

@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isPrivate } from "./lib/privacy.ts";
 import { aggregate, scoreRun } from "./score.ts";
 import type { Aggregate, RunRow, Stat } from "./score.ts";
 
@@ -62,7 +63,8 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   const bases = baselineDirs.map((d) => scoreRun(d));
   const cand = scoreRun(candidateDir);
   const baseRows = bases.flatMap((b) => b.rows);
-  const devOf = (rows: RunRow[]): RunRow[] => rows.filter((r) => r.split !== "heldout");
+  // Only dev drives gains and losses and only held-out is the regression guard; confirm and reserve rows belong to neither.
+  const devOf = (rows: RunRow[]): RunRow[] => rows.filter((r) => !isPrivate(r.split));
   const heldOf = (rows: RunRow[]): RunRow[] => rows.filter((r) => r.split === "heldout");
   const bT = byTask(devOf(baseRows));
   const cT = byTask(devOf(cand.rows));

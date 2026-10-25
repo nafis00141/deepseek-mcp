@@ -10,6 +10,7 @@ import { runChecks } from "../eval/lib/checks.ts";
 import { loadTasks, makeRepo, removeDir } from "../eval/lib/fixture.ts";
 import { allowlistEnv } from "../eval/lib/proc.ts";
 import { McpClient } from "../eval/lib/mcp.ts";
+import { privateLabel } from "../eval/lib/privacy.ts";
 import { validateTasks } from "../eval/lib/validate.ts";
 import { costOf, startProxy } from "../eval/lib/proxy.ts";
 import type { Pricing, StepResult } from "../eval/lib/types.ts";
@@ -241,6 +242,32 @@ describe("runner end to end (real server, stub upstream)", () => {
     const again = await runEval(opts(up.url, { only: ["ask-stub"], resume: true }));
     assert.equal(again.records[0]?.complete, true);
     assert.equal(up.seen.length, n);
+    await up.close();
+  });
+
+  it("a held-out task's id and title reach no log line, manifest or public file; its details go under private/heldout/", async () => {
+    put(tasksRoot, "zz-secret-held/task.json", JSON.stringify({ ...base, id: "zz-secret-held", split: "heldout", title: "zz secret held title" }));
+    put(tasksRoot, "zz-secret-held/repo/src/a.js", "export const a = 1;\n");
+    const up = await stubUpstream();
+    const lines: string[] = [];
+    const r = await runEval(opts(up.url, { only: ["zz-secret-held"], splits: ["dev", "heldout"], runId: "r-priv", log: (l) => lines.push(l) }));
+    assert.equal(r.records[0]?.status, "ok");
+    assert.ok(!lines.join("\n").includes("zz-secret-held") && !lines.join("\n").includes("zz secret held title"), "no id or title in the console log");
+    assert.ok(lines.some((l) => l.includes(privateLabel("zz-secret-held"))), "the hashed label is shown instead");
+    const manifest = fs.readFileSync(path.join(r.runDir, "manifest.json"), "utf8");
+    assert.ok(!manifest.includes("zz-secret-held") && manifest.includes(privateLabel("zz-secret-held")));
+    assert.ok(fs.existsSync(path.join(r.runDir, "private", "heldout", "zz-secret-held", "1", "checks.json")));
+    const outside: string[] = [];
+    const walk = (d: string): void => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        if (e.name === "private" || e.name === "server") continue;
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (fs.readFileSync(p, "utf8").includes("zz-secret-held")) outside.push(e.name);
+      }
+    };
+    walk(r.runDir);
+    assert.deepEqual(outside, [], "no file outside private/ names the task");
     await up.close();
   });
 

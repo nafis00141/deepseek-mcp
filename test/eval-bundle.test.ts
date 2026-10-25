@@ -18,7 +18,7 @@ const put = (rel: string, content: string): void => {
   fs.writeFileSync(p, content);
 };
 
-function record(task: string, k: number, split: "dev" | "heldout", pass: boolean, checkName: string): RunRecord {
+function record(task: string, k: number, split: RunRecord["split"], pass: boolean, checkName: string): RunRecord {
   return {
     complete: true, status: "ok", task, k, family: "code", split, expect: { gate: "done" }, gate_status: "done",
     steps: [{ step: 1, role: "impl", job_id: "aaaaaaaa", status: "done", infra: false }],
@@ -39,7 +39,7 @@ function mkRun(id: string): string {
   const dir = path.join(root, id);
   const w = (rel: string, c: string): void => put(`${id}/${rel}`, c);
   w("manifest.json", JSON.stringify({ settings: {}, k: 1 }));
-  for (const [task, split, pass, check, base] of [["dev-bad", "dev", false, "hidden-tests", ""], ["dev-good", "dev", true, "hidden-tests", ""], ["secret-task", "heldout", false, "secret-check", "heldout-private/"], ["leaky-task", "heldout", false, "leaky-check", ""]] as const) {
+  for (const [task, split, pass, check, base] of [["dev-bad", "dev", false, "hidden-tests", ""], ["dev-good", "dev", true, "hidden-tests", ""], ["secret-task", "heldout", false, "secret-check", "private/heldout/"], ["conf-task", "confirm", false, "conf-check", "private/confirm/"], ["res-task", "reserve", false, "res-check", "private/reserve/"], ["leaky-task", "heldout", false, "leaky-check", ""]] as const) {
     w(`${base}${task}/1/checks.json`, JSON.stringify(record(task, 1, split, pass, check)));
     w(`${base}${task}/1/step1.final.txt`, `FINAL TEXT OF ${task}`);
     w(`${base}${task}/1/step1.trace.jsonl`, trace);
@@ -63,7 +63,7 @@ describe("reviewer bundle", () => {
   });
 
   it("never carries a held-out task, wherever its record sits, only the aggregate row", () => {
-    for (const secret of ["secret-task", "secret-check", "leaky-task", "leaky-check", "FINAL TEXT OF secret", "FINAL TEXT OF leaky", "DIFF OF secret", "DIFF OF leaky"]) assert.ok(!bundle.includes(secret), secret);
+    for (const secret of ["secret-task", "secret-check", "leaky-task", "leaky-check", "conf-task", "conf-check", "res-task", "res-check", "FINAL TEXT OF secret", "FINAL TEXT OF leaky", "FINAL TEXT OF conf", "FINAL TEXT OF res", "DIFF OF secret", "DIFF OF leaky", "DIFF OF conf", "DIFF OF res"]) assert.ok(!bundle.includes(secret), secret);
     assert.match(bundle, /held-out \(aggregate only\)/);
   });
 });
@@ -97,6 +97,17 @@ describe("patch lint", () => {
     assert.deepEqual([hg[0]?.kind, hg[0]?.term], ["task id", "(held-out)"]);
   });
 
+  it("treats confirm and reserve tasks like held-out: forbidden, and never printed", () => {
+    put("lint-confirm/conf-one/task.json", def("conf-one", "confirm", "reconcile the ledger totals against every incoming statement"));
+    put("lint-reserve/res-one/task.json", def("res-one", "reserve", "normalise the vendor prefixes in every product code"));
+    const f = forbiddenTerms([path.join(root, "lint-confirm"), path.join(root, "lint-reserve")]);
+    const patch = (line: string) => `--- a/x\n+++ b/x\n@@ -1 +1 @@\n+${line}\n`;
+    for (const line of ["see conf-one", "see res-one", "reconcile the ledger totals against every incoming statement"]) {
+      const hits = lintPatch(patch(line), f);
+      assert.ok(hits.length > 0 && hits.every((h) => h.term === "(held-out)"), line);
+    }
+  });
+
   it("accepts a general patch, and ignores removed and context lines of a diff", () => {
     const good = "--- a/src/roles.ts\n+++ b/src/roles.ts\n@@ -1,2 +1,2 @@\n-the ship-it case\n context ship-it\n+Treat the orchestrator's instruction as binding for every role.\n";
     assert.deepEqual(lintPatch(good, forbidden), []);
@@ -109,7 +120,7 @@ describe("held-out look budget", () => {
       const w = (rel: string, c: string): void => put(`${id}/${rel}`, c);
       w("manifest.json", "{}");
       for (const task of ["t1", "t2"]) for (let k = 1; k <= 5; k++) w(`${task}/${k}/checks.json`, JSON.stringify(record(task, k, "dev", id.startsWith("cmpb") ? k <= (task === "t1" ? 0 : 5) : k <= devPass, "c")));
-      for (let k = 1; k <= 5; k++) w(`heldout-private/h/${k}/checks.json`, JSON.stringify(record("h", k, "heldout", k <= heldPass, "c")));
+      for (let k = 1; k <= 5; k++) w(`private/heldout/h/${k}/checks.json`, JSON.stringify(record("h", k, "heldout", k <= heldPass, "c")));
       return path.join(root, id);
     };
     const base = mk("cmpb", 0, 5);

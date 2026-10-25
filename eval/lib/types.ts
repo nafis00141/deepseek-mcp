@@ -1,6 +1,6 @@
 /** Shapes shared by the eval runner, checks and (later) scoring. */
 
-export type Split = "dev" | "heldout";
+export type Split = "dev" | "heldout" | "confirm" | "reserve";
 
 export interface StepDef {
   role: string;
