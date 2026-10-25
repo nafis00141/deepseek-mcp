@@ -42,12 +42,12 @@ describe("context settings: loading and validation", () => {
 
   it("until the new compaction modes exist, settings only they would read are refused; MAX_TOKENS must be a number", () => {
     assert.equal(COMPACTION_BUILT, false);
-    for (const e of [{ COMPACT_CHARS: "500000" }, { COMPACT_LOW: "0.7" }, { CONTEXT_MODE: "extended" }, { CONTEXT_MODE: "extended", CONTEXT_TOKENS: "250000", CONTEXT_WINDOW: "1000000" }]) {
+    for (const e of [{ COMPACT_LOW: "0.7" }, { CONTEXT_MODE: "extended" }, { CONTEXT_MODE: "extended", CONTEXT_TOKENS: "250000", CONTEXT_WINDOW: "1000000" }]) {
       assert.throws(() => loadContextSettings(e, 32000), /is not supported yet \(the new compaction modes are not built\)/, JSON.stringify(e));
     }
     assert.doesNotThrow(() => loadContextSettings({ READ_MAX_LINES: "2000", JOB_INPUT_TOKEN_CAP: "5", READ_BUDGET_CHARS: "90000" }, 32000), "the settings that do something are accepted");
     assert.doesNotThrow(() => loadContextSettings({ CONTEXT_MODE: "legacy" }, 32000), "legacy is the default and is always allowed");
-    assert.doesNotThrow(() => loadContextSettings({ COMPACT_CHARS: "220000" }, 32000), "the default value is not a change");
+    assert.equal(loadContextSettings({ COMPACT_CHARS: "500000" }, 32000).compactChars, 500000, "COMPACT_CHARS is the legacy budget and works now");
     assert.throws(() => loadContextSettings({}, Number.NaN), /MAX_TOKENS must be a positive number/);
   });
 

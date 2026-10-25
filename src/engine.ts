@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CFG } from "./config.ts";
+import { createCompactor } from "./compact.ts";
 import type { Config } from "./config.ts";
 import { SKIP_DIRS, detectRepoEol, git, rel, runCmd, resolveInRepo, toPosix } from "./repo.ts";
 import { isDeniedRead, isDeniedWrite, matchAny, scopeFor } from "./taskfile.ts";
@@ -429,20 +430,6 @@ async function chat(messages: ChatMessage[], tools: ToolSchema[], signal?: Abort
   throw new Error("unreachable");
 }
 
-function compact(messages: ChatMessage[], budget = 220000): ChatMessage[] {
-  let size = JSON.stringify(messages).length;
-  if (size <= budget) return messages;
-  for (let i = 2; i < messages.length - 6 && size > budget; i++) {
-    const m = messages[i] as ChatMessage;
-    if (m.role === "tool" && typeof m.content === "string" && m.content.length > 3000) {
-      const cut = m.content.length - 3000;
-      m.content = m.content.slice(0, 3000) + `\n[truncated ${cut} chars]`;
-      size -= cut;
-    }
-  }
-  return messages;
-}
-
 export async function ping(): Promise<{ reply: string; usage: ChatResponse["usage"] | null }> {
   const data = await chat([{ role: "user", content: "Reply with exactly: PONG" }], []);
   return { reply: data.choices?.[0]?.message?.content ?? "", usage: data.usage ?? null };
@@ -467,6 +454,7 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
     { role: "system", content: SYSTEM },
     { role: "user", content: prompt },
   ];
+  const compactMessages = createCompactor(CFG);
   const usage: Usage = { input: 0, output: 0 };
   const repairs: Repair[] = [];
   let turns = 0;
@@ -489,7 +477,7 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
     const t0 = Date.now();
     let data: ChatResponse;
     try {
-      data = await chat(compact(messages), tools, signal, trace);
+      data = await chat(compactMessages(messages), tools, signal, trace);
     } catch (e) {
       // Scored as a failed job, not dropped as an infrastructure error: a size refusal is a property of the arm.
       if (!(e instanceof RequestTooLarge)) throw e;

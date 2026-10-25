@@ -13,8 +13,9 @@ Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.
 | compare fixes from review 4 | done: SCREEN PASS wording, unknown filter refused, filtered aggregates and cost ratio, exclusion-rate refusal (>10 points), like-for-like settings check, `--dev-only --final` refused; `confirm.ts` refuses two runs of the same server code and takes `--upstream-timeout`; the proxy charges an estimate for timed-out upstream calls against the cap and counts them; the runner validates the arm's context settings before spending and records the effective values and task env |
 | job guard | a final answer that fails its self-check no longer gets a repair turn once the cap is reached |
 | review 5 fixes | done: REFUSED decision (capped arm, unequal exclusions, unlike manifests: server code, timeouts, non-arm settings incl. `JOB_INPUT_TOKEN_CAP`, per-task env), excluded records carry axis/tier, `--exclude-axis` on an absent axis is a note, the runner asks the pinned server copy (`--check-config`) and refuses `--resume` with different settings and an upstream timeout not above `REQUEST_TIMEOUT_MS`, the proxy charges only timeouts and keeps the estimate apart from measured cost, `CONTEXT_MODE=extended` is refused until T3 |
+| T2 legacy compaction module | done: `src/compact.ts` (`compactLegacy`, `createCompactor`); `COMPACT_CHARS` is the legacy budget and works now; the oracle test `test/compact.test.ts` runs a frozen copy of the old function the engine's way over growing conversations of eight shapes |
 | T7b interleaved arms | not started |
-| T2, T3, T6 (the rest), T8-T13 | not started |
+| T3, T6 (the rest), T8-T13 | not started |
 
 Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and `test/eval-calibrate.test.ts`. Full suite 274 tests, none failing.
 

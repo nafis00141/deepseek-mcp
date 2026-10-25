@@ -354,7 +354,7 @@ describe("runner end to end (real server, stub upstream)", () => {
     const up = await stubUpstream();
     const run = (env: Record<string, string>, over: Partial<EvalOpts> = {}) => runEval(opts(up.url, { only: ["ask-stub"], runId: "r-bad-arm", serverEnv: { ...process.env, ...env }, ...over }));
     await assert.rejects(run({ JOB_INPUT_TOKEN_CAP: "-5" }), /refused: invalid context settings: JOB_INPUT_TOKEN_CAP="-5"/);
-    await assert.rejects(run({ COMPACT_CHARS: "500000" }), /refused: invalid context settings: COMPACT_CHARS is not supported yet/);
+    await assert.rejects(run({ COMPACT_LOW: "0.7" }), /refused: invalid context settings: COMPACT_LOW is not supported yet/);
     await assert.rejects(run({ CONTEXT_MODE: "extended" }), /CONTEXT_MODE=extended is not supported yet/);
     await assert.rejects(run({}, { upstreamTimeoutS: 100 }), /upstream timeout \(100 s\) must be longer than REQUEST_TIMEOUT_MS \(300 s\)/);
     await assert.rejects(run({ REQUEST_TIMEOUT_MS: "400000" }), /must be longer than REQUEST_TIMEOUT_MS \(400 s\)/);

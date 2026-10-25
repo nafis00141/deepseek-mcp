@@ -149,7 +149,7 @@ export function loadContextSettings(e: NodeJS.ProcessEnv, maxTokens: number, com
   };
   if (!compactionBuilt) {
     if (s.contextMode === "extended") bad.push("CONTEXT_MODE=extended is not supported yet (the new compaction modes are not built); remove it");
-    for (const [name, set] of [["COMPACT_CHARS", s.compactChars !== 220000], ["COMPACT_LOW", s.compactLow !== 0], ["CONTEXT_TOKENS", s.contextTokens !== 0], ["CONTEXT_WINDOW", s.contextWindow !== 0]] as const) {
+    for (const [name, set] of [["COMPACT_LOW", s.compactLow !== 0], ["CONTEXT_TOKENS", s.contextTokens !== 0], ["CONTEXT_WINDOW", s.contextWindow !== 0]] as const) {
       if (set) bad.push(`${name} is not supported yet (the new compaction modes are not built); remove it`);
     }
   }
