@@ -1,0 +1,33 @@
+{
+  "id": "impl-edit-existing",
+  "family": "code",
+  "split": "dev",
+  "title": "extend an existing function without changing its old behaviour",
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/ship/tasks/01-express.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/shipping.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/shipping.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

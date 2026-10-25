@@ -1,0 +1,10 @@
+{
+  "steps": [
+    {
+      "status": "done",
+      "result": {
+        "answer": "The EU tax rate is 20% (0.2), defined in src/rates.js:4."
+      }
+    }
+  ]
+}

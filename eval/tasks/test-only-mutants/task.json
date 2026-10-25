@@ -1,0 +1,51 @@
+{
+  "id": "test-only-mutants",
+  "family": "code",
+  "split": "dev",
+  "title": "tests-only job: the new tests must kill three planted mutants",
+  "steps": [
+    {
+      "role": "test",
+      "target": "specs/stats/tasks/01-tests.md",
+      "instruction": "Cover mean and median, including unsorted numeric input and even-length arrays."
+    }
+  ],
+  "checks": [
+    {
+      "type": "diff_only_under",
+      "name": "tests-only",
+      "compliance": true,
+      "prefix": "tests/"
+    },
+    {
+      "type": "mutants_killed",
+      "name": "mutants-killed",
+      "compliance": true,
+      "mutants": [
+        {
+          "file": "src/stats.js",
+          "from": "mutants/lexicographic-sort.js"
+        },
+        {
+          "file": "src/stats.js",
+          "from": "mutants/upper-middle.js"
+        },
+        {
+          "file": "src/stats.js",
+          "from": "mutants/wrong-divisor.js"
+        }
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/*.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "fix-after-finding",
+  "family": "fix",
+  "split": "dev",
+  "title": "fix only continues a branch created by an impl job in this server's history; a seeded branch plus review file cannot start it",
+  "needs_role": "fix-from-branch",
+  "steps": [],
+  "checks": [],
+  "expect": {
+    "gate": "done"
+  }
+}

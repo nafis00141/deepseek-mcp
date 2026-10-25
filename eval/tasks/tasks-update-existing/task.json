@@ -1,0 +1,76 @@
+{
+  "id": "tasks-update-existing",
+  "family": "writing",
+  "split": "dev",
+  "title": "revise existing task files as instructed (finding 1)",
+  "steps": [
+    {
+      "role": "tasks",
+      "target": "specs/slug",
+      "instruction": "Revise the existing task files, do not start over. Task 01 must now be restricted to src/lib/** and tests/lib/** and its test_command must be exactly: node --test tests/lib/slug.test.js. Add a new task file 03-docs.md that owns docs/** only and depends on 01. Leave task 02 exactly as it is."
+    }
+  ],
+  "checks": [
+    {
+      "type": "file_contains",
+      "name": "01-scope-narrowed",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/slug/tasks/01-core.md",
+      "pattern": "^allowed_paths:\\s*\\[(?=[^\\]]*src/lib/\\*\\*)(?=[^\\]]*tests/lib/\\*\\*)[^\\]]*\\]\\s*$",
+      "flags": "im"
+    },
+    {
+      "type": "file_not_contains",
+      "name": "01-no-broad-src",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/slug/tasks/01-core.md",
+      "pattern": "^allowed_paths:.*(\\[|,)\\s*(src|tests)/\\*\\*",
+      "flags": "im"
+    },
+    {
+      "type": "file_contains",
+      "name": "01-test-command",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/slug/tasks/01-core.md",
+      "pattern": "^test_command:\\s*node --test tests/lib/slug\\.test\\.js\\s*$",
+      "flags": "im"
+    },
+    {
+      "type": "file_count",
+      "name": "03-exists",
+      "compliance": true,
+      "dir": "specs/slug/tasks",
+      "regex": "^03-.*\\.md$",
+      "min": 1,
+      "max": 1
+    },
+    {
+      "type": "dir_file_contains",
+      "name": "03-owns-docs",
+      "compliance": true,
+      "dir": "specs/slug/tasks",
+      "name_pattern": "^03-.*\\.md$",
+      "pattern": "^allowed_paths:\\s*\\[\\s*docs/\\*\\*\\s*\\]",
+      "flags": "im"
+    },
+    {
+      "type": "file_contains",
+      "name": "02-untouched",
+      "ref": "work",
+      "path": "specs/slug/tasks/02-cli.md",
+      "pattern": "^allowed_paths:\\s*\\[bin/\\*\\*\\]\\s*$",
+      "flags": "im"
+    },
+    {
+      "type": "only_changed_under",
+      "name": "docs-only-write",
+      "prefix": "specs/"
+    }
+  ],
+  "expect": {
+    "gate": "done"
+  }
+}

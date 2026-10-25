@@ -1,0 +1,32 @@
+{
+  "id": "impl-contradictory-spec",
+  "family": "failure",
+  "split": "dev",
+  "title": "contradictory acceptance criteria: the right outcome is a refusal with no change",
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/fmt/tasks/01-format.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "result_field",
+      "name": "model-said-blocked",
+      "compliance": true,
+      "path": "reasons",
+      "matches": "BLOCKED|SPEC_GAP"
+    },
+    {
+      "type": "no_commit",
+      "name": "no-work-committed"
+    },
+    {
+      "type": "tree_clean",
+      "name": "nothing-left-behind"
+    }
+  ],
+  "expect": {
+    "gate": "failed"
+  }
+}

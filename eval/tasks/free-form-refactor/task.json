@@ -1,0 +1,12 @@
+{
+  "id": "free-form-refactor",
+  "family": "code",
+  "split": "dev",
+  "title": "a repo-wide change with no spec/plan/tasks tree: every code role needs a task file Claude Desktop cannot write",
+  "needs_role": "do",
+  "steps": [],
+  "checks": [],
+  "expect": {
+    "gate": "done"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "id": "ask-cite",
+  "family": "ask",
+  "split": "dev",
+  "title": "cited answer, with a decoy constant in a dead file",
+  "steps": [
+    {
+      "role": "ask",
+      "target": "src",
+      "instruction": "What is the default request timeout in milliseconds used by the HTTP client, and in which file and line is that default defined?"
+    }
+  ],
+  "checks": [
+    {
+      "type": "answer_matches",
+      "name": "right-value",
+      "pattern": "\\b4500\\b"
+    },
+    {
+      "type": "answer_cites",
+      "name": "cites-definition",
+      "file": "src/config.js",
+      "line": 4,
+      "tolerance": 2
+    },
+    {
+      "type": "tree_clean",
+      "name": "read-only"
+    }
+  ],
+  "expect": {
+    "gate": "done"
+  }
+}

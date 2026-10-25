@@ -1,0 +1,37 @@
+{
+  "id": "ask-multihop",
+  "family": "ask",
+  "split": "dev",
+  "title": "answer needs two files combined (tax minus member discount)",
+  "steps": [
+    {
+      "role": "ask",
+      "target": "src",
+      "instruction": "What effective tax rate applies to an order shipped to the EU region when the customer is a member, and which files and lines determine it?"
+    }
+  ],
+  "checks": [
+    {
+      "type": "answer_matches",
+      "name": "right-value",
+      "pattern": "0\\.15\\b|\\b15\\s*%"
+    },
+    {
+      "type": "answer_cites",
+      "name": "cites-rates",
+      "file": "src/rates.js"
+    },
+    {
+      "type": "answer_cites",
+      "name": "cites-pricing",
+      "file": "src/pricing.js"
+    },
+    {
+      "type": "tree_clean",
+      "name": "read-only"
+    }
+  ],
+  "expect": {
+    "gate": "done"
+  }
+}

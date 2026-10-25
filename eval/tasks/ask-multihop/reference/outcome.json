@@ -1,0 +1,10 @@
+{
+  "steps": [
+    {
+      "status": "done",
+      "result": {
+        "answer": "The effective rate is 0.15 (15%): TAX.EU is 0.2 (src/rates.js:4) minus the member discount of 0.05 (src/rates.js:5), combined in effectiveRate at src/pricing.js:5."
+      }
+    }
+  ]
+}

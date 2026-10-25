@@ -1,0 +1,39 @@
+{
+  "id": "api-retry",
+  "family": "failure",
+  "split": "dev",
+  "title": "two injected API 500s: the server retries and still answers",
+  "proxy": {
+    "fail_first": [
+      500,
+      500
+    ]
+  },
+  "steps": [
+    {
+      "role": "ask",
+      "target": "src",
+      "instruction": "What is the value of MAX_ITEMS, and where is it defined?"
+    }
+  ],
+  "checks": [
+    {
+      "type": "answer_matches",
+      "name": "right-value",
+      "pattern": "\\b25\\b"
+    },
+    {
+      "type": "trace_event",
+      "name": "retried-twice",
+      "event": "api_retry",
+      "min": 2
+    },
+    {
+      "type": "tree_clean",
+      "name": "read-only"
+    }
+  ],
+  "expect": {
+    "gate": "done"
+  }
+}

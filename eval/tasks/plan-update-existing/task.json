@@ -1,0 +1,63 @@
+{
+  "id": "plan-update-existing",
+  "family": "writing",
+  "split": "dev",
+  "title": "revise an existing plan.md as instructed, keeping the rest (finding 1, plan role)",
+  "steps": [
+    {
+      "role": "plan",
+      "target": "specs/cli",
+      "instruction": "Revise the existing plan, do not start over. Move the command line entry point from bin/cli.js to src/cli.js everywhere the plan mentions it, and add a second entry to Risks about Windows path separators. Keep every other section exactly as it is."
+    }
+  ],
+  "checks": [
+    {
+      "type": "file_contains",
+      "name": "cli-moved",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/cli/plan.md",
+      "pattern": "src/cli\\.js"
+    },
+    {
+      "type": "file_not_contains",
+      "name": "old-path-gone",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/cli/plan.md",
+      "pattern": "bin/cli\\.js"
+    },
+    {
+      "type": "file_contains",
+      "name": "windows-risk-added",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/cli/plan.md",
+      "pattern": "^## Risks[\\s\\S]*?(Windows|path separator)[\\s\\S]*?^## Task breakdown",
+      "flags": "im"
+    },
+    {
+      "type": "file_contains",
+      "name": "approach-kept",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/cli/plan.md",
+      "pattern": "Wrap slug in a thin command line entry point, and keep all parsing in one place\\."
+    },
+    {
+      "type": "file_contains",
+      "name": "old-risk-kept",
+      "ref": "work",
+      "path": "specs/cli/plan.md",
+      "pattern": "shebang"
+    },
+    {
+      "type": "only_changed_under",
+      "name": "writes-only-specs",
+      "prefix": "specs/"
+    }
+  ],
+  "expect": {
+    "gate": "done"
+  }
+}

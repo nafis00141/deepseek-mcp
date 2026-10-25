@@ -1,0 +1,33 @@
+{
+  "id": "impl-add-fn-hidden",
+  "family": "code",
+  "split": "dev",
+  "title": "add a function; visible test is shallow, hidden tests cover the spec (finding 3)",
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/text/tasks/01-slugify.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/slugify.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/slugify.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

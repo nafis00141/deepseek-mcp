@@ -1,0 +1,11 @@
+{
+  "branch": "test/01-ref",
+  "steps": [
+    {
+      "status": "done",
+      "result": {
+        "branch": "test/01-ref"
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "research-report",
+  "family": "ask",
+  "split": "dev",
+  "title": "ask returns clipped text and writes nothing; a researched report saved as an artifact has no role",
+  "needs_role": "research",
+  "steps": [],
+  "checks": [],
+  "expect": {
+    "gate": "done"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {
+      "status": "failed",
+      "result": {
+        "reasons": [
+          "model reported BLOCKED: AC-1 requires a number and AC-2 requires a string for the same call"
+        ]
+      }
+    }
+  ]
+}

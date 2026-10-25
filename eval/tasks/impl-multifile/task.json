@@ -1,0 +1,33 @@
+{
+  "id": "impl-multifile",
+  "family": "code",
+  "split": "dev",
+  "title": "rename a config key and update every consumer (three files)",
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/cfg/tasks/01-rename.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/config.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/config.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

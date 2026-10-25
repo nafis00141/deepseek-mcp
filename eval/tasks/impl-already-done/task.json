@@ -1,0 +1,32 @@
+{
+  "id": "impl-already-done",
+  "family": "failure",
+  "split": "dev",
+  "title": "the work already exists: the right outcome is noop, not a pointless commit",
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/clamp/tasks/01-clamp.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "result_field",
+      "name": "reported-noop",
+      "compliance": true,
+      "path": "status",
+      "equals": "noop"
+    },
+    {
+      "type": "no_commit",
+      "name": "no-commit"
+    },
+    {
+      "type": "tree_clean",
+      "name": "nothing-left-behind"
+    }
+  ],
+  "expect": {
+    "gate": "noop"
+  }
+}

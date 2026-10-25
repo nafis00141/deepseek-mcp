@@ -1,0 +1,42 @@
+{
+  "id": "impl-crlf",
+  "family": "code",
+  "split": "dev",
+  "title": "edit a CRLF file without converting or mixing its line endings",
+  "crlf_files": [
+    "src/inventory.js"
+  ],
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/inv/tasks/01-lowstock.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "files": [
+        "tests/inventory.hidden.test.js"
+      ]
+    },
+    {
+      "type": "file_eol",
+      "name": "still-crlf",
+      "compliance": true,
+      "path": "src/inventory.js",
+      "eol": "crlf"
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/inventory.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

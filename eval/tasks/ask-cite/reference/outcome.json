@@ -1,0 +1,10 @@
+{
+  "steps": [
+    {
+      "status": "done",
+      "result": {
+        "answer": "The default is 4500 ms: DEFAULT_TIMEOUT_MS is defined in src/config.js:4 and used by describeRequest in src/client.js:5. (src/legacy.js:3 has an unused 3000 ms constant.)"
+      }
+    }
+  ]
+}

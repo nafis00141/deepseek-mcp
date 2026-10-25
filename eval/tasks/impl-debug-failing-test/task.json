@@ -1,0 +1,33 @@
+{
+  "id": "impl-debug-failing-test",
+  "family": "code",
+  "split": "dev",
+  "title": "debug a failing test: the general rule, not a special case",
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/dates/tasks/01-fix-leap.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/dates.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/dates.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

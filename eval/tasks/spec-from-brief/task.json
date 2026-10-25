@@ -1,0 +1,63 @@
+{
+  "id": "spec-from-brief",
+  "family": "writing",
+  "split": "dev",
+  "title": "write a spec from a brief that carries two binding constraints",
+  "steps": [
+    {
+      "role": "spec",
+      "target": "specs/coupon",
+      "instruction": "Coupon codes at checkout: a coupon gives a percentage discount, only one coupon can be applied per order, and expired coupons are rejected. Binding constraints: the discount is capped at 50 percent, and the UI is out of scope, so list it under Non-goals."
+    }
+  ],
+  "checks": [
+    {
+      "type": "file_contains",
+      "name": "ui-is-a-non-goal",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/coupon/spec.md",
+      "pattern": "^## Non-goals[\\s\\S]*?\\b(UI|user interface)\\b[\\s\\S]*?^## Acceptance",
+      "flags": "im"
+    },
+    {
+      "type": "file_contains",
+      "name": "cap-is-stated",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/coupon/spec.md",
+      "pattern": "50\\s*(%|percent)"
+    },
+    {
+      "type": "file_pattern_count",
+      "name": "at-least-3-criteria",
+      "ref": "work",
+      "path": "specs/coupon/spec.md",
+      "pattern": "^\\s*(-\\s*)?\\**AC-\\d+",
+      "flags": "gm",
+      "min": 3
+    },
+    {
+      "type": "file_contains",
+      "name": "covers-expiry",
+      "ref": "work",
+      "path": "specs/coupon/spec.md",
+      "pattern": "expire"
+    },
+    {
+      "type": "file_not_contains",
+      "name": "no-code",
+      "ref": "work",
+      "path": "specs/coupon/spec.md",
+      "pattern": "```"
+    },
+    {
+      "type": "only_changed_under",
+      "name": "writes-only-specs",
+      "prefix": "specs/"
+    }
+  ],
+  "expect": {
+    "gate": "done"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "id": "chain-impl-review-context",
+  "family": "chain",
+  "split": "dev",
+  "title": "a decision given only to impl must not make review raise a false blocker (finding 2)",
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/price/tasks/01-round.md",
+      "instruction": "Binding decision, not in the spec: toCents is exactly Math.round(amount * 100). So toCents(1.005) is 100 and toCents(1.255) is 125, because of binary floating point. The tests must assert exactly those values. Do not try to correct for floating point."
+    },
+    {
+      "role": "review",
+      "target": "specs/price"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "files": [
+        "tests/price.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    },
+    {
+      "type": "verdict_is",
+      "name": "review-passes",
+      "compliance": true,
+      "step": 2,
+      "value": "PASS"
+    },
+    {
+      "type": "result_field",
+      "name": "no-false-blocker",
+      "compliance": true,
+      "step": 2,
+      "path": "blockers",
+      "equals": 0
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/price.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

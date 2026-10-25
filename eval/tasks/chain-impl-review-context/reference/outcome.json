@@ -1,0 +1,18 @@
+{
+  "branch": "impl/01-ref",
+  "steps": [
+    {
+      "status": "done",
+      "result": {
+        "branch": "impl/01-ref"
+      }
+    },
+    {
+      "status": "done",
+      "result": {
+        "verdict": "PASS",
+        "blockers": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {
+      "status": "failed",
+      "result": {
+        "reasons": [
+          "test_command failed (still failing after 2 repair attempt(s))"
+        ]
+      }
+    }
+  ]
+}

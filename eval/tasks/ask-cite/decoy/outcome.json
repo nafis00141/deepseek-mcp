@@ -1,0 +1,10 @@
+{
+  "steps": [
+    {
+      "status": "done",
+      "result": {
+        "answer": "The default timeout is 3000 ms, defined in src/legacy.js:3 as DEFAULT_TIMEOUT_MS."
+      }
+    }
+  ]
+}
