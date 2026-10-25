@@ -1,6 +1,6 @@
 # Plan: harder evals
 
-Status: steps 1-5 (tooling) built; steps 6-7 (authoring, calibration) not started. See `Specs/STATUS.md`.
+Status: steps 1-5 (tooling) built; step 6 (authoring) done for the 12 hard dev tasks, not yet for the hard reserve tasks; step 7 (calibrate and freeze) not started. See `Specs/STATUS.md`.
 
 Implements `Specs/harder-evals/spec.md` (v2).
 

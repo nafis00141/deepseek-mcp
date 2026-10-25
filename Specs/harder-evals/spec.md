@@ -1,6 +1,6 @@
 # Spec: harder evals
 
-Status: v2, tooling built (T1-T7), tasks and calibration not yet (see `Specs/STATUS.md`). Builds on `Specs/eval-system/`. Baseline server version: 0.9.0 plus the accepted candidates.
+Status: v2, tooling built (T1-T7), the 12 hard dev tasks written and reviewed, calibration and the hard reserve tasks not yet (see `Specs/STATUS.md`). Builds on `Specs/eval-system/`. Baseline server version: 0.9.0 plus the accepted candidates.
 
 ## Goal
 

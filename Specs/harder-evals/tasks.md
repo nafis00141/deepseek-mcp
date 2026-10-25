@@ -11,10 +11,10 @@
 | T5 calibrate | done (972f9c4) |
 | T6 band/provenance compare | done (972f9c4) |
 | T7 chance check | done (972f9c4); ordered pairs, dev-only rule |
-| T8-T15 twelve hard dev tasks | not started |
+| T8-T15 twelve hard dev tasks | written by a separate blind author session (75f3807, 6a95631, 4f97c39, 1a4967f), reviewed by Opus 5.5 (7 ready, 5 fixed); offline `--validate` passes. Not done: the optional template variation of `refund-tax-off-by-one-cent` / `session-never-expires`, and a live pilot at k=1 (the `slugify-max-length-project-gates` pilot must show real in-job repairs, else retag its axis) |
 | T16 hard reserve tasks | not started |
-| T17 calibrate and freeze | not started; spends money, ask first |
-| T18 cost and speed | not started |
+| T17 calibrate and freeze | not started; spends money, ask first; the `long-context` extra-large tasks should land first or the freeze is redone |
+| T18 cost and speed | not started; measured so far: full dev `--validate` (35 tasks) about 194 s, over the 3-minute limit |
 | T19 docs | not started |
 
 Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.md` (v2).

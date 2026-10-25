@@ -17,7 +17,7 @@ Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.
 | T7b interleaved arms | not started |
 | T3, T6 (the rest), T8-T13 | not started |
 
-Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and `test/eval-calibrate.test.ts`. Full suite 274 tests, none failing.
+Tests: `test/context-settings.test.ts`, `test/compact.test.ts`, additions in `test/eval-lib.test.ts`, `test/eval-calibrate.test.ts` and `test/eval-confirm.test.ts`. Last full suite: 305 tests, none failing. `Specs/STATUS.md` has the one-page summary.
 
 
 ## T1. Settings with unchanged defaults
