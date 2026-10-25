@@ -17,6 +17,7 @@ import type { LookResult } from "./lib/looks.ts";
 import { spendLook } from "./lib/looks.ts";
 import { isPrivate } from "./lib/privacy.ts";
 import { nonInferiority, signFlipPValue } from "./lib/stats.ts";
+import type { Tier } from "./lib/types.ts";
 import type { NonInferiority } from "./lib/stats.ts";
 import { aggregate, scoreRun } from "./score.ts";
 import type { Aggregate, RunRow, ScoreResult, Stat } from "./score.ts";
@@ -49,6 +50,7 @@ export interface FinalStats {
 export interface TaskDelta {
   task: string;
   family: string;
+  tier: Tier;
   base: Aggregate;
   cand: Aggregate;
   delta: number;
@@ -164,7 +166,7 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
     const delta = r3(mean(c.hidden_pass) - mean(base.hidden_pass));
     const means = perBaseline.map((m) => (m.get(task)?.length ? mean(aggregate(m.get(task)!).hidden_pass) : null)).filter((x): x is number => x !== null);
     dev.push({
-      task, family: brs[0]!.family, base, cand: c, delta, verdict: delta >= opts.delta ? "gain" : delta <= -opts.delta ? "loss" : "same",
+      task, family: brs[0]!.family, tier: brs[0]!.tier, base, cand: c, delta, verdict: delta >= opts.delta ? "gain" : delta <= -opts.delta ? "loss" : "same",
       noise: means.length > 1 ? r3(Math.max(...means) - Math.min(...means)) : null,
     });
   }
@@ -261,8 +263,8 @@ export function renderComparison(c: Comparison): string {
   const out = [`# Compare - ${c.candidate} vs ${c.baselines.join(" + ")}`, ""];
   out.push(`Rule: a dev task is a gain/loss when its hidden-pass mean moves by >= ${c.opts.delta}; KEEP needs net >= ${c.opts.minNet} and held-out within the tolerance below.`, "");
   out.push(`## Decision: ${c.decision}`, "", ...c.reasons.map((r) => `- ${r}`), "");
-  out.push("## Dev tasks (hidden pass, paired)", "", "| task | family | hidden pass | change | false accept | compliance | tokens | noise between baselines | |", "|---|---|---|---|---|---|---|---|---|");
-  for (const d of c.dev) out.push(`| ${d.task} | ${d.family} | ${arrow(d.base.hidden_pass, d.cand.hidden_pass)} | ${sign(d.delta)} | ${arrow(d.base.false_accept, d.cand.false_accept)} | ${arrow(d.base.compliance, d.cand.compliance)} | ${k(d.base.tokens_total)} -> ${k(d.cand.tokens_total)} | ${d.noise === null ? "-" : sign(d.noise)} | ${d.verdict === "same" ? "" : d.verdict} |`);
+  out.push("## Dev tasks (hidden pass, paired)", "", "| task | tier | family | hidden pass | change | false accept | compliance | tokens | noise between baselines | |", "|---|---|---|---|---|---|---|---|---|---|");
+  for (const d of c.dev) out.push(`| ${d.task} | ${d.tier} | ${d.family} | ${arrow(d.base.hidden_pass, d.cand.hidden_pass)} | ${sign(d.delta)} | ${arrow(d.base.false_accept, d.cand.false_accept)} | ${arrow(d.base.compliance, d.cand.compliance)} | ${k(d.base.tokens_total)} -> ${k(d.cand.tokens_total)} | ${d.noise === null ? "-" : sign(d.noise)} | ${d.verdict === "same" ? "" : d.verdict} |`);
   out.push("", `gains ${c.gains}, losses ${c.losses}, net ${c.net}`, "");
   out.push("## Aggregates", "", "| | hidden pass | false accept | first try | compliance |", "|---|---|---|---|---|");
   out.push(`| all runs | ${arrow(c.overall.base.hidden_pass, c.overall.cand.hidden_pass)} | ${arrow(c.overall.base.false_accept, c.overall.cand.false_accept)} | ${arrow(c.overall.base.first_try, c.overall.cand.first_try)} | ${arrow(c.overall.base.compliance, c.overall.cand.compliance)} |`);

@@ -9,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import { CFG } from "../src/config.ts";
 import { runChecks } from "../eval/lib/checks.ts";
 import { loadTasks, makeRepo, removeDir, taskRoots } from "../eval/lib/fixture.ts";
+import { tierOf } from "../eval/lib/types.ts";
 import { allowlistEnv } from "../eval/lib/proc.ts";
 import { McpClient } from "../eval/lib/mcp.ts";
 import { privateLabel } from "../eval/lib/privacy.ts";
@@ -185,6 +186,21 @@ describe("fixture repo", () => {
     assert.deepEqual(loadTasks([root], ["dev", "heldout"]).map((t) => t.id), ["t-dev", "t-held"]);
     put(root, "bad/task.json", JSON.stringify({ id: "other", split: "dev" }));
     assert.throws(() => loadTasks([root], ["dev"]), /must equal the folder name/);
+  });
+
+  it("a task with no tier reads as regression; a hard task must name its axis; an unknown tier is refused", () => {
+    const root = path.join(scratch, "tasks-tier");
+    const def = (id: string, extra: object) => JSON.stringify({ id, family: "code", split: "dev", title: id, steps: [], checks: [], expect: { gate: "done" }, ...extra });
+    put(root, "old/task.json", def("old", {}));
+    put(root, "h/task.json", def("h", { tier: "hard", axis: "long-context", author: "a", authored_on: "2026-10-26", authored_after_result: false }));
+    const got = loadTasks([root], ["dev"]);
+    assert.deepEqual(got.map((t) => [t.id, tierOf(t)]), [["h", "hard"], ["old", "regression"]]);
+    assert.equal(got[0]?.authored_after_result, false);
+    put(root, "noaxis/task.json", def("noaxis", { tier: "hard" }));
+    assert.throws(() => loadTasks([root], ["dev"]), /a hard task must name its axis/);
+    fs.rmSync(path.join(root, "noaxis"), { recursive: true });
+    put(root, "weird/task.json", def("weird", { tier: "medium" }));
+    assert.throws(() => loadTasks([root], ["dev"]), /tier "medium" must be one of regression, hard/);
   });
 });
 
@@ -426,6 +442,27 @@ describe("task validation (--validate)", () => {
     assert.match(rows[3]!.problems.join(), /decoy2 passes every hidden check/);
   });
 
+  it("a hard task needs two decoys that each say their kind, and the kinds must differ", async () => {
+    const mk = (root: string, over: { decoy2?: object | null; kind1?: string | undefined; kind2?: string | undefined }) => {
+      const dir = path.join(scratch, root, "hd");
+      put(dir, "task.json", JSON.stringify({ id: "hd", family: "ask", split: "dev", tier: "hard", axis: "long-context", title: "hd", steps: [{ role: "ask", target: "src" }], checks: [{ type: "answer_matches", pattern: "yes" }], expect: { gate: "done" } }));
+      put(dir, "repo/src/a.js", "x\n");
+      put(dir, "reference/outcome.json", JSON.stringify({ steps: [{ status: "done", result: { answer: "yes" } }] }));
+      put(dir, "decoy/outcome.json", JSON.stringify({ ...(over.kind1 ? { kind: over.kind1 } : {}), steps: [{ status: "done", result: { answer: "no" } }] }));
+      if (over.decoy2 !== null) put(dir, "decoy2/outcome.json", JSON.stringify({ ...(over.kind2 ? { kind: over.kind2 } : {}), steps: [{ status: "done", result: { answer: "maybe" } }] }));
+      return validateTasks(loadTasks([path.join(scratch, root)], ["dev"]), CFG.git, () => {});
+    };
+    const good = await mk("hard-ok", { kind1: "special-case", kind2: "incomplete" });
+    assert.deepEqual(good.filter((r) => !r.ok), []);
+    assert.deepEqual(good.map((r) => r.variant), ["unsolved", "reference", "decoy", "decoy2"]);
+    const one = await mk("hard-one", { decoy2: null, kind1: "special-case" });
+    assert.match(one.filter((r) => !r.ok).map((r) => r.problems.join()).join(), /needs two decoys of different kinds/);
+    const nokind = await mk("hard-nokind", { kind2: "incomplete" });
+    assert.match(nokind.filter((r) => !r.ok).map((r) => r.problems.join()).join(), /decoy\/outcome\.json must say what kind of wrong/);
+    const same = await mk("hard-same", { kind1: "Incomplete", kind2: "incomplete" });
+    assert.match(same.filter((r) => !r.ok).map((r) => r.problems.join()).join(), /both of kind "incomplete"/);
+  });
+
   it("flags a task whose decoy proves nothing and whose reference does not pass", async () => {
     const dir = path.join(scratch, "tasks-bad", "bad");
     put(dir, "task.json", JSON.stringify({ id: "bad", family: "ask", split: "dev", title: "bad", steps: [{ role: "ask", target: "src" }], checks: [{ type: "answer_matches", pattern: "yes" }], expect: { gate: "done" } }));
@@ -453,6 +490,16 @@ describe("cli: private splits", () => {
       assert.match(validate.stdout, /validated \d+ task\(s\)/);
     }
     assert.match(cli("--split", "bogus").stderr, /--split must be dev, heldout, all, confirm or reserve/);
+  });
+
+  it("a live run needs --arm and --purpose; validate and dry-run do not", () => {
+    for (const args of [[], ["--arm", "baseline"], ["--purpose", "comparison"]]) {
+      const r = cli("--split", "dev", "--yes", ...args);
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /a live run needs --arm baseline\|candidate and --purpose calibration\|comparison/);
+    }
+    assert.equal(cli("--validate", "--split", "dev", "--only", "no-such-task").status, 0);
+    assert.doesNotMatch(cli("--split", "dev", "--dry-run").stderr, /a live run needs/);
   });
 });
 

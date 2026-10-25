@@ -18,6 +18,8 @@ interface Spec {
   k: number;
   split?: "dev" | "heldout";
   family?: string;
+  tier?: "regression" | "hard";
+  axis?: string;
   gate: string | null;
   expect?: string;
   checks: [name: string, pass: boolean, compliance?: boolean][];
@@ -36,7 +38,7 @@ function mkRun(id: string, specs: Spec[]): string {
     fs.mkdirSync(dir, { recursive: true });
     const status = s.status ?? "ok";
     const rec: RunRecord = {
-      complete: status === "ok", status, task: s.task, k: s.k, family: s.family ?? "code", split, expect: { gate: s.expect ?? "done" }, gate_status: s.gate,
+      complete: status === "ok", status, task: s.task, k: s.k, family: s.family ?? "code", ...(s.tier ? { tier: s.tier } : {}), ...(s.axis ? { axis: s.axis } : {}), split, expect: { gate: s.expect ?? "done" }, gate_status: s.gate,
       steps: [{ step: 1, role: "impl", job_id: "aaaaaaaa", status: s.gate ?? "?", infra: false }],
       checks: s.checks.map(([name, pass, compliance]) => ({ name, type: "x", pass, detail: "", compliance: Boolean(compliance) })),
       usage: { requests: 1, prompt: s.tokens?.[0] ?? 1000, completion: s.tokens?.[1] ?? 500, reasoning: 200, cache_hit: 0, cost: 0.01, capped: status === "capped" }, wall_s: 10,
@@ -62,6 +64,8 @@ describe("scoring", () => {
     { task: "t-capped", k: 1, gate: null, status: "capped", checks: [] },
     { task: "h-secret", k: 1, split: "heldout", family: "review", gate: "done", checks: [["verdict", false]], events: [turn] },
     { task: "h-fine", k: 1, split: "heldout", family: "review", gate: "done", checks: [["verdict", true]], events: [turn] },
+    { task: "t-hard", k: 1, tier: "hard", axis: "long-context", gate: "done", checks: [["c", false]], events: [turn] },
+    { task: "t-hard", k: 2, tier: "hard", axis: "long-context", gate: "done", checks: [["c", true]], events: [turn] },
   ]);
   const r = scoreRun(runDir);
   const row = (task: string, k: number) => r.rows.find((x) => x.task === task && x.k === k)!;
@@ -70,7 +74,7 @@ describe("scoring", () => {
     assert.deepEqual([row("t-fa", 1).gate_accepted, row("t-fa", 1).hidden_pass, row("t-fa", 1).false_accept], [true, false, true]);
     assert.deepEqual([row("t-fr", 1).gate_accepted, row("t-fr", 1).hidden_pass, row("t-fr", 1).false_reject, row("t-fr", 1).false_accept], [false, true, true, false]);
     // t-flaky#2 is one too: the gate said done while its check failed. Dev rows sort before held-out rows.
-    assert.deepEqual(r.false_accepts.map((x) => `${x.task}#${x.k}`), ["t-fa#1", "t-flaky#2", "h-secret#1"]);
+    assert.deepEqual(r.false_accepts.map((x) => `${x.task}#${x.k}`), ["t-fa#1", "t-flaky#2", "t-hard#1", "h-secret#1"]);
     assert.deepEqual(r.false_rejects.map((x) => x.task), ["t-fr"]);
   });
 
@@ -108,11 +112,26 @@ describe("scoring", () => {
   });
 
   it("aggregates by split and family", () => {
-    assert.equal(r.by_split.dev?.runs, 7);
+    assert.equal(r.by_split.dev?.runs, 9);
     assert.equal(r.by_split.heldout?.runs, 2);
     assert.equal(r.by_split.heldout?.hidden_pass?.mean, 0.5);
     assert.equal(r.by_family.review?.runs, 2);
-    assert.equal(r.overall.runs, 9);
+    assert.equal(r.overall.runs, 11);
+  });
+
+  it("aggregates by tier over dev tasks only; a record with no tier reads as regression", () => {
+    assert.deepEqual(Object.keys(r.by_tier), ["hard", "regression"]);
+    assert.equal(r.by_tier.hard?.runs, 2);
+    assert.equal(r.by_tier.hard?.hidden_pass?.mean, 0.5);
+    assert.equal(r.by_tier.regression?.runs, 7, "held-out rows are not in a tier table");
+    assert.deepEqual([row("t-ok", 1).tier, row("t-ok", 1).axis], ["regression", null]);
+    assert.deepEqual([row("t-hard", 1).tier, row("t-hard", 1).axis], ["hard", "long-context"]);
+    const hard = r.tasks.find((t) => t.task === "t-hard")!;
+    assert.deepEqual([hard.tier, hard.axis], ["hard", "long-context"]);
+    const md = renderReport(r);
+    assert.match(md, /## By tier/);
+    assert.match(md, /\| t-hard \| hard \(long-context\) \|/);
+    assert.match(md, /\| t-ok \| regression \|/);
   });
 });
 

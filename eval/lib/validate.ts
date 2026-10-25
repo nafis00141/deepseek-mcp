@@ -6,6 +6,7 @@
  *   reference/             a correct outcome                   -> every check passes, gate == expect.gate
  *   decoy/                 passes the server gate, still wrong -> some check FAILS, gate done/noop
  * An outcome folder holds outcome.json ({ branch?, steps: [{ status, result }] }) and an optional files/ overlay.
+ * A task with tier "hard" must have both decoy/ and decoy2/, each saying its "kind", and the kinds must differ.
  * With `branch`, the overlay is committed on that branch (as a code job would); otherwise it is written to the working tree.
  * `validate.visible_test` (task.json) must pass on both reference and decoy: that is what lets a decoy slip past the real gate.
  */
@@ -14,9 +15,12 @@ import path from "node:path";
 import { runChecks } from "./checks.ts";
 import { makeRepo, runSetup } from "./fixture.ts";
 import { allowlistEnv, runProc } from "./proc.ts";
+import { tierOf } from "./types.ts";
 import type { LoadedTask, StepResult } from "./types.ts";
 
 interface Outcome {
+  /** What a decoy gets wrong (special-case, incomplete, ...). Hard tasks must give it and the two decoys must differ. */
+  kind?: string;
   branch?: string;
   steps: { status: string; job_id?: string; result?: Record<string, unknown> }[];
 }
@@ -79,6 +83,16 @@ async function simulate(task: LoadedTask, variant: ValidationRow["variant"], git
   }
 }
 
+/** What kind of wrong a decoy is, as its outcome.json says; null when the file or the field is missing. */
+function decoyKind(task: LoadedTask, variant: "decoy" | "decoy2"): string | null {
+  try {
+    const o = JSON.parse(fs.readFileSync(path.join(task.dir, variant, "outcome.json"), "utf8")) as Outcome;
+    return typeof o.kind === "string" && o.kind.trim() ? o.kind.trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function validateTasks(tasks: LoadedTask[], gitBin: string, log: (l: string) => void): Promise<ValidationRow[]> {
   const rows: ValidationRow[] = [];
   for (const t of tasks) {
@@ -86,11 +100,29 @@ export async function validateTasks(tasks: LoadedTask[], gitBin: string, log: (l
       log(`  N/A ${t.id} (needs role "${t.needs_role}")`);
       continue;
     }
-    const variants: ValidationRow["variant"][] = ["unsolved", "reference", "decoy", ...(fs.existsSync(path.join(t.dir, "decoy2")) ? (["decoy2"] as const) : [])];
+    const hard = tierOf(t) === "hard";
+    const variants: ValidationRow["variant"][] = ["unsolved", "reference", "decoy", ...(hard || fs.existsSync(path.join(t.dir, "decoy2")) ? (["decoy2"] as const) : [])];
     for (const v of variants) {
       const row = await simulate(t, v, gitBin).catch((e: Error) => ({ task: t.id, variant: v, ok: false, problems: [`validation crashed: ${e.message.slice(0, 200)}`], checks: "" }));
+      if (hard && v === "decoy2" && row.problems.some((p) => p.startsWith("missing "))) row.problems.unshift("a hard task needs two decoys of different kinds (decoy/ and decoy2/)");
+      if (hard && (v === "decoy" || v === "decoy2")) {
+        const kind = decoyKind(t, v);
+        if (!kind) {
+          row.ok = false;
+          row.problems.push(`a hard task's ${v}/outcome.json must say what kind of wrong it is ("kind", for example "special-case" or "incomplete")`);
+        }
+      }
       rows.push(row);
       log(`  ${row.ok ? "ok  " : "FAIL"} ${t.id} / ${v}${row.checks ? ` [${row.checks}]` : ""}${row.problems.map((p) => `\n         ${p}`).join("")}`);
+    }
+    if (hard) {
+      const a = decoyKind(t, "decoy");
+      const b = decoyKind(t, "decoy2");
+      if (a && b && a === b) {
+        const row: ValidationRow = { task: t.id, variant: "decoy2", ok: false, problems: [`decoy and decoy2 are both of kind "${a}": the two decoys must differ`], checks: "" };
+        rows.push(row);
+        log(`  FAIL ${t.id} / decoy kinds\n         ${row.problems[0]}`);
+      }
     }
   }
   return rows;

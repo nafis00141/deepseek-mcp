@@ -30,11 +30,27 @@ export interface CheckDef {
   [key: string]: unknown;
 }
 
+export type Tier = "regression" | "hard";
+
+export const TIERS: readonly Tier[] = ["regression", "hard"];
+
+/** A task that does not say reads as a regression task: the floor the suite always had. */
+export const tierOf = (t: { tier?: Tier | undefined }): Tier => t.tier ?? "regression";
+
 export interface TaskDef {
   id: string;
   family: string;
   split: Split;
   title: string;
+  /** regression (default) or hard. Hard tasks are calibrated and need two decoys. */
+  tier?: Tier;
+  /** The one named difficulty a hard task targets (larger-repo, ambiguous-spec, remote-cause, multi-repair, cross-file-refactor, windows, order-dependent, long-context). */
+  axis?: string;
+  /** Provenance: who wrote the task, when, and whether they had already seen a run result for its family. */
+  author?: string;
+  authored_on?: string;
+  authored_after_result?: boolean;
+  authored_after_run?: string;
   /** A family the current roles cannot express: reported as N/A, never run. */
   needs_role?: string;
   /** Server env overrides (e.g. MAX_TOKENS). Only names on the runner's allowlist are passed. */

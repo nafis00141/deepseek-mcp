@@ -21,7 +21,8 @@ import { computeLineage, heldoutSetHash } from "./lib/lineage.ts";
 import { isPrivate, labelOf, runSubdir } from "./lib/privacy.ts";
 import { startProxy } from "./lib/proxy.ts";
 import { validateTasks } from "./lib/validate.ts";
-import type { LoadedTask, Pricing, Split, StepResult, UsageStats } from "./lib/types.ts";
+import { tierOf } from "./lib/types.ts";
+import type { LoadedTask, Pricing, Split, StepResult, Tier, UsageStats } from "./lib/types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
@@ -62,6 +63,9 @@ export interface RunRecord {
   task: string;
   k: number;
   family: string;
+  /** Absent in records written before tiers existed: those read as regression. */
+  tier?: Tier;
+  axis?: string;
   split: Split;
   expect: { gate: string };
   gate_status: string | null;
@@ -288,7 +292,7 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
       aborted = "API key found in run output; stopping";
     }
     const rec: RunRecord = {
-      complete: status === "ok" && last?.status !== "running", status, task: task.id, k, family: task.family, split: task.split, expect: task.expect, gate_status: last ? last.status : null,
+      complete: status === "ok" && last?.status !== "running", status, task: task.id, k, family: task.family, tier: tierOf(task), ...(task.axis ? { axis: task.axis } : {}), split: task.split, expect: task.expect, gate_status: last ? last.status : null,
       steps: steps.map((s) => ({ step: s.step, role: s.role, job_id: s.job_id, status: s.status, infra: s.result.infra === true })),
       checks, usage: sess.stats, wall_s: Math.round((Date.now() - t0) / 100) / 10, ...(error ? { error } : {}),
     };
@@ -435,6 +439,9 @@ async function main(): Promise<void> {
     log: (l) => console.log(l),
   };
   if (opts.resume && typeof a["run-id"] !== "string") throw new Error("--resume needs --run-id <existing run>");
+  // A live run is the only thing that spends money and produces evidence, so it must say whose evidence it is. No default: a
+  // calibration run mistaken for a comparison baseline (or the reverse) is the mistake these two flags exist to stop.
+  if (a.validate !== true && !opts.dryRun && !opts.resume && (!opts.arm || !opts.purpose)) throw new Error("a live run needs --arm baseline|candidate and --purpose calibration|comparison (there is no default)");
   if (a.validate === true) {
     // Offline: no key, no server, no model call.
     const tasks = loadTasks(opts.tasksRoots, opts.splits).filter((t) => !opts.only || opts.only.includes(t.id));

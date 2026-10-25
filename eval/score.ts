@@ -10,12 +10,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isPrivate } from "./lib/privacy.ts";
+import { tierOf } from "./lib/types.ts";
+import type { Tier } from "./lib/types.ts";
 import type { RunRecord } from "./run.ts";
 
 export interface RunRow {
   task: string;
   k: number;
   family: string;
+  tier: Tier;
+  axis: string | null;
   split: string;
   expect_gate: string;
   gate_status: string | null;
@@ -65,6 +69,8 @@ export type Aggregate = { runs: number; flaky: boolean } & Record<Metric, Stat |
 export interface TaskScore extends Aggregate {
   task: string;
   family: string;
+  tier: Tier;
+  axis: string | null;
   split: string;
 }
 
@@ -77,6 +83,8 @@ export interface ScoreResult {
   overall: Aggregate;
   by_split: Record<string, Aggregate>;
   by_family: Record<string, Aggregate>;
+  /** regression and hard tiers over the dev (public) tasks only: a tier cut across private splits would leak their mix */
+  by_tier: Record<string, Aggregate>;
   tasks: TaskScore[];
   false_accepts: { task: string; k: number; split: string; failing_checks: string[] }[];
   false_rejects: { task: string; k: number; split: string; failing_checks: string[] }[];
@@ -144,7 +152,7 @@ export function scoreRecord(rec: RunRecord, family: string, dir: string): RunRow
   const flagged = rec.checks.filter((c) => c.compliance);
   const fixSteps = rec.steps.some((s) => s.role === "fix");
   return {
-    task: rec.task, k: rec.k, family, split: rec.split, expect_gate: rec.expect.gate, gate_status: finalGate,
+    task: rec.task, k: rec.k, family, tier: tierOf(rec), axis: rec.axis ?? null, split: rec.split, expect_gate: rec.expect.gate, gate_status: finalGate,
     gate_accepted: accepted, gate_expected: expected, hidden_pass: hidden,
     false_accept: accepted && !hidden,
     false_reject: !expected && hidden,
@@ -207,12 +215,13 @@ export function scoreRun(runDir: string): ScoreResult {
     for (const r of items) m.set(key(r), [...(m.get(key(r)) ?? []), r]);
     return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, rs]) => make(k, rs));
   };
-  const tasks = byKey(rows, (r) => `${r.split}\u0000${r.task}`, (_k, rs) => ({ task: rs[0]!.task, family: rs[0]!.family, split: rs[0]!.split, ...aggregate(rs) }));
+  const tasks = byKey(rows, (r) => `${r.split}\u0000${r.task}`, (_k, rs) => ({ task: rs[0]!.task, family: rs[0]!.family, tier: rs[0]!.tier, axis: rs[0]!.axis, split: rs[0]!.split, ...aggregate(rs) }));
   const failures = (pick: (r: RunRow) => boolean) => rows.filter(pick).map((r) => ({ task: r.task, k: r.k, split: r.split, failing_checks: r.failing_checks }));
   return {
     run_id: path.basename(runDir), manifest, rows, excluded, overall: aggregate(rows),
     by_split: Object.fromEntries(byKey(rows, (r) => r.split, (k, rs) => [k, aggregate(rs)] as const)),
     by_family: Object.fromEntries(byKey(rows, (r) => r.family, (k, rs) => [k, aggregate(rs)] as const)),
+    by_tier: Object.fromEntries(byKey(rows.filter((r) => !isPrivate(r.split)), (r) => r.tier,(k, rs) => [k, aggregate(rs)] as const)),
     tasks, false_accepts: failures((r) => r.false_accept), false_rejects: failures((r) => r.false_reject),
   };
 }
@@ -239,8 +248,9 @@ export function renderReport(r: ScoreResult): string {
   out.push("## Summary", "", table(HEAD, [aggRow("overall", r.overall), ...Object.entries(r.by_split).map(([s, a]) => aggRow(isPrivate(s) ? `${s === "heldout" ? "held-out" : s} (aggregate only)` : s, a))]), "");
   out.push("`hidden pass` is the true correctness. `false accept` = the gate said done/noop but a hidden check failed. `false reject` = the gate result differed from the expected one while every hidden check passed. `first try` = correct with no repair and no fix round. `compliance` = the task's instruction-compliance checks.", "");
   out.push("## By family", "", table(HEAD, Object.entries(r.by_family).map(([f, a]) => aggRow(f, a))), "");
+  out.push("## By tier", "", table(HEAD, Object.entries(r.by_tier).map(([t, a]) => aggRow(t, a))), "");
   const dev = r.tasks.filter((t) => !isPrivate(t.split));
-  out.push("## Tasks (dev)", "", table(["task", "family", ...HEAD.slice(1), "flaky"], dev.map((t) => [t.task, t.family, ...aggRow("", t).slice(1), t.flaky ? "yes" : ""])), "");
+  out.push("## Tasks (dev)", "", table(["task", "tier", "family", ...HEAD.slice(1), "flaky"], dev.map((t) => [t.task, t.axis ? `${t.tier} (${t.axis})` : t.tier, t.family, ...aggRow("", t).slice(1), t.flaky ? "yes" : ""])), "");
   const section = (title: string, items: ScoreResult["false_accepts"]): void => {
     const shown = items.filter((i) => !isPrivate(i.split));
     const hiddenCount = items.length - shown.length;
@@ -263,7 +273,7 @@ export function writeScores(runDir: string): ScoreResult {
   const r = scoreRun(runDir);
   const pub = <T extends { split: string }>(items: T[]): T[] => items.filter((x) => !isPrivate(x.split));
   const visible = {
-    run_id: r.run_id, overall: r.overall, by_split: r.by_split, by_family: r.by_family,
+    run_id: r.run_id, overall: r.overall, by_split: r.by_split, by_family: r.by_family, by_tier: r.by_tier,
     tasks: pub(r.tasks), rows: pub(r.rows), excluded: pub(r.excluded), false_accepts: pub(r.false_accepts), false_rejects: pub(r.false_rejects),
   };
   fs.writeFileSync(path.join(runDir, "scores.json"), JSON.stringify(visible, null, 2) + "\n");

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { TIERS, tierOf } from "./types.ts";
 import type { LoadedTask, Split, TaskDef } from "./types.ts";
 
 export const sleepSync = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -33,6 +34,8 @@ export function loadTasks(roots: string[], splits: Split[]): LoadedTask[] {
       const prior = seen.get(def.id);
       if (prior) throw new Error(`task id "${def.id}" is used twice: ${prior} and ${file}`);
       seen.set(def.id, file);
+      if (def.tier !== undefined && !TIERS.includes(def.tier)) throw new Error(`${file}: tier "${String(def.tier)}" must be one of ${TIERS.join(", ")}`);
+      if (tierOf(def) === "hard" && !def.axis) throw new Error(`${file}: a hard task must name its axis`);
       if (mustBe && def.split !== mustBe) throw new Error(`${file}: split "${def.split}" does not match the folder "${path.basename(root)}" (expected "${mustBe}")`);
       if (!splits.includes(def.split)) continue;
       out.push({ ...def, dir: path.join(root, e.name) });
