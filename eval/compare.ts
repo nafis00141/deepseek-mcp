@@ -13,16 +13,37 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { LookResult } from "./lib/looks.ts";
+import { spendLook } from "./lib/looks.ts";
 import { isPrivate } from "./lib/privacy.ts";
+import { nonInferiority, signFlipPValue } from "./lib/stats.ts";
+import type { NonInferiority } from "./lib/stats.ts";
 import { aggregate, scoreRun } from "./score.ts";
-import type { Aggregate, RunRow, Stat } from "./score.ts";
+import type { Aggregate, RunRow, ScoreResult, Stat } from "./score.ts";
 
 export interface CompareOpts {
   minNet: number;
   delta: number;
-  heldoutTol: number;
+  /** An explicit held-out tolerance. When absent it is derived from baseline-to-baseline noise, else `defaultHeldoutTol`. */
+  heldoutTol?: number;
+  defaultHeldoutTol?: number;
   /** The held-out look budget for this candidate is spent: the held-out guard cannot be applied, so KEEP is off the table. */
   ignoreHeldout?: boolean;
+  /** Where the held-out look budget stands after this comparison; shown in the report. */
+  looks?: LookResult;
+  /** A final decision: KEEP additionally needs a paired improvement test on dev and a non-inferiority test on held-out (FINAL_ALPHA). */
+  final?: boolean;
+}
+
+/** The significance level of the final decision, one-sided. Fixed here and in eval/loop.md, before any final run. */
+export const FINAL_ALPHA = 0.1;
+
+export interface FinalStats {
+  alpha: number;
+  /** paired over dev tasks: is the mean per-task change above zero? */
+  dev: { n: number; mean_diff: number; p_improve: number; significant: boolean };
+  /** paired over shared held-out tasks: is the mean per-task change above minus the tolerance? null when the guard was not applied */
+  heldout: NonInferiority | null;
 }
 
 export interface TaskDelta {
@@ -44,11 +65,75 @@ export interface Comparison {
   gains: number;
   losses: number;
   net: number;
-  heldout: { base: Aggregate; cand: Aggregate; delta: number; ok: boolean } | null;
+  heldout: HeldoutGuard | null;
+  /** Set when the guard could not be applied for a reason other than the look budget (for example no common held-out tasks). */
+  heldout_problem: string | null;
+  final: FinalStats | null;
   overall: { base: Aggregate; cand: Aggregate };
   token_ratio: number | null;
   decision: "KEEP" | "REJECT" | "INCONCLUSIVE";
   reasons: string[];
+}
+
+export interface HeldoutGuard {
+  base: Aggregate;
+  cand: Aggregate;
+  delta: number;
+  ok: boolean;
+  /** held-out tasks both sides ran (the only ones pooled), and how many were on one side only */
+  shared_tasks: number;
+  base_only: number;
+  cand_only: number;
+  tolerance: number;
+  tolerance_source: "explicit" | "derived" | "default";
+  /** standard error of the per-task gap between baselines of identical code, when it could be measured */
+  noise_se: number | null;
+  noise_runs: string[];
+}
+
+export const TOL_FLOOR = 0.05;
+export const TOL_CAP = 0.15;
+const clamp = (x: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, x));
+
+/** Per-task held-out hidden-pass mean of one scored run, over `only` tasks when given. */
+function heldoutMeans(s: ScoreResult, only?: Set<string>): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const [task, rows] of byTask(s.rows.filter((r) => r.split === "heldout"))) {
+    if (only && !only.has(task)) continue;
+    m.set(task, rows.reduce((a, r) => a + (r.hidden_pass ? 1 : 0), 0) / rows.length);
+  }
+  return m;
+}
+
+/**
+ * The guard tolerance measured from noise: among the named baselines, take those that ran identical server code (equal
+ * `server_hash` in their manifests), look at the held-out split only, and for every pair compute the standard error of the
+ * mean per-task gap. The tolerance is 1.5 times the largest such error, kept between TOL_FLOOR and TOL_CAP. Null when fewer
+ * than two baselines share a server hash or fewer than two tasks are common to a pair.
+ */
+export function derivedTolerance(bases: ScoreResult[], shared?: Set<string>): { tolerance: number; se: number; runs: string[] } | null {
+  const byHash = new Map<string, ScoreResult[]>();
+  for (const b of bases) {
+    const h = (b.manifest as { server_hash?: string } | null)?.server_hash;
+    if (h) byHash.set(h, [...(byHash.get(h) ?? []), b]);
+  }
+  let best: { se: number; runs: string[] } | null = null;
+  for (const group of byHash.values()) {
+    if (group.length < 2) continue;
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        const a = heldoutMeans(group[i]!, shared);
+        const b = heldoutMeans(group[j]!, shared);
+        const gaps = [...a.keys()].filter((t) => b.has(t)).map((t) => a.get(t)! - b.get(t)!);
+        if (gaps.length < 2) continue;
+        const mu = gaps.reduce((x, y) => x + y, 0) / gaps.length;
+        const sd = Math.sqrt(gaps.reduce((x, y) => x + (y - mu) ** 2, 0) / (gaps.length - 1));
+        const se = sd / Math.sqrt(gaps.length);
+        if (!best || se > best.se) best = { se, runs: [group[i]!.run_id, group[j]!.run_id] };
+      }
+    }
+  }
+  return best ? { tolerance: clamp(1.5 * best.se, TOL_FLOOR, TOL_CAP), se: best.se, runs: best.runs } : null;
 }
 
 const mean = (s: Stat | null): number => s?.mean ?? 0;
@@ -87,14 +172,28 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   const losses = dev.filter((d) => d.verdict === "loss").length;
   const net = gains - losses;
 
-  const hb = heldOf(baseRows);
-  const hc = heldOf(cand.rows);
-  let heldout: Comparison["heldout"] = null;
+  // Pool held-out rows only over the tasks both sides ran: after a rotation, or when tasks were added, old baselines and a new
+  // candidate can cover different sets, and a pooled rate over different sets compares nothing.
+  const hbAll = heldOf(baseRows);
+  const hcAll = heldOf(cand.rows);
+  const baseTasks = new Set(hbAll.map((r) => r.task));
+  const candTasks = new Set(hcAll.map((r) => r.task));
+  const sharedSet = new Set([...baseTasks].filter((t) => candTasks.has(t)));
+  const hb = hbAll.filter((r) => sharedSet.has(r.task));
+  const hc = hcAll.filter((r) => sharedSet.has(r.task));
+  let heldout: HeldoutGuard | null = null;
+  let heldout_problem: string | null = null;
+  if (hbAll.length && hcAll.length && !sharedSet.size) heldout_problem = "the baselines and the candidate share no held-out task, so the held-out guard cannot be applied";
   if (hb.length && hc.length && !opts.ignoreHeldout) {
     const base = aggregate(hb);
     const c = aggregate(hc);
     const delta = r3(mean(c.hidden_pass) - mean(base.hidden_pass));
-    heldout = { base, cand: c, delta, ok: delta >= -opts.heldoutTol };
+    const derived = opts.heldoutTol === undefined ? derivedTolerance(bases, sharedSet) : null;
+    const tolerance = opts.heldoutTol ?? derived?.tolerance ?? opts.defaultHeldoutTol ?? 0.1;
+    heldout = {
+      base, cand: c, delta, ok: delta >= -tolerance, shared_tasks: sharedSet.size, base_only: baseTasks.size - sharedSet.size, cand_only: candTasks.size - sharedSet.size,
+      tolerance: r3(tolerance), tolerance_source: opts.heldoutTol !== undefined ? "explicit" : derived ? "derived" : "default", noise_se: derived ? r3(derived.se) : null, noise_runs: derived?.runs ?? [],
+    };
   }
 
   const reasons: string[] = [];
@@ -106,7 +205,7 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
     decision = "REJECT";
     if (net < 0) reasons.push(`net ${net}: more dev tasks got worse than better`);
     if (losses > 0 && gains === 0) reasons.push(`${losses} dev task(s) got worse and none better`);
-    if (heldout && !heldout.ok) reasons.push(`held-out hidden-pass fell by ${Math.abs(heldout.delta)} (tolerance ${opts.heldoutTol})`);
+    if (heldout && !heldout.ok) reasons.push(`held-out hidden-pass fell by ${Math.abs(heldout.delta)} (tolerance ${heldout.tolerance}, ${heldout.tolerance_source})`);
   } else if (net >= opts.minNet) {
     decision = "KEEP";
     reasons.push(`net ${net} >= ${opts.minNet} with the held-out guard intact`);
@@ -118,11 +217,39 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
     reasons.push("held-out look budget exhausted: the held-out guard was not applied, so this cannot be KEEP");
     if (decision === "KEEP") decision = "INCONCLUSIVE";
   }
+  if (heldout_problem) {
+    reasons.push(`${heldout_problem}; this cannot be KEEP`);
+    if (decision === "KEEP") decision = "INCONCLUSIVE";
+  }
+  // The final statistic is paired over tasks: repeats of one task are not independent, so the unit is the per-task change.
+  let final: FinalStats | null = null;
+  if (opts.final) {
+    const devDiffs = dev.map((d) => d.delta);
+    const p = signFlipPValue(devDiffs, { alternative: "greater" });
+    let ni: NonInferiority | null = null;
+    if (heldout) {
+      const bh = byTask(hb);
+      const ch = byTask(hc);
+      const heldDiffs = [...sharedSet].sort().map((t) => mean(aggregate(ch.get(t)!).hidden_pass) - mean(aggregate(bh.get(t)!).hidden_pass));
+      ni = nonInferiority(heldDiffs, heldout.tolerance, FINAL_ALPHA);
+    }
+    final = { alpha: FINAL_ALPHA, dev: { n: devDiffs.length, mean_diff: r3(devDiffs.length ? devDiffs.reduce((a, b) => a + b, 0) / devDiffs.length : 0), p_improve: r3(p), significant: p <= FINAL_ALPHA }, heldout: ni };
+    if (decision === "KEEP") {
+      const why: string[] = [];
+      if (!final.dev.significant) why.push(`the paired improvement test over ${final.dev.n} dev task(s) gives p=${final.dev.p_improve}, above ${FINAL_ALPHA}`);
+      if (!ni) why.push("held-out non-inferiority could not be tested");
+      else if (!ni.non_inferior) why.push(`held-out non-inferiority is not shown (p=${r3(ni.p)} at margin ${ni.margin}, alpha ${FINAL_ALPHA})`);
+      if (why.length) {
+        decision = "INCONCLUSIVE";
+        reasons.push(`final decision: ${why.join("; ")}`);
+      }
+    }
+  }
   const bTok = mean(aggregate(baseRows).tokens_total);
   const cTok = mean(aggregate(cand.rows).tokens_total);
   const token_ratio = bTok > 0 ? Math.round((cTok / bTok) * 100) / 100 : null;
   if (token_ratio !== null && token_ratio > 1.25) reasons.push(`cost warning: mean tokens per run rose ${Math.round((token_ratio - 1) * 100)}%`);
-  return { baselines: bases.map((b) => b.run_id), candidate: cand.run_id, opts, dev, gains, losses, net, heldout, overall: { base: aggregate(baseRows), cand: aggregate(cand.rows) }, token_ratio, decision, reasons };
+  return { baselines: bases.map((b) => b.run_id), candidate: cand.run_id, opts, dev, gains, losses, net, heldout, overall: { base: aggregate(baseRows), cand: aggregate(cand.rows) }, token_ratio, decision, reasons, heldout_problem, final };
 }
 
 const pct = (s: Stat | null): string => (s ? `${Math.round(s.mean * 100)}%` : "-");
@@ -132,7 +259,7 @@ const k = (s: Stat | null): string => `${Math.round(mean(s) / 100) / 10}k`;
 
 export function renderComparison(c: Comparison): string {
   const out = [`# Compare - ${c.candidate} vs ${c.baselines.join(" + ")}`, ""];
-  out.push(`Rule: a dev task is a gain/loss when its hidden-pass mean moves by >= ${c.opts.delta}; KEEP needs net >= ${c.opts.minNet} and held-out within ${c.opts.heldoutTol}.`, "");
+  out.push(`Rule: a dev task is a gain/loss when its hidden-pass mean moves by >= ${c.opts.delta}; KEEP needs net >= ${c.opts.minNet} and held-out within the tolerance below.`, "");
   out.push(`## Decision: ${c.decision}`, "", ...c.reasons.map((r) => `- ${r}`), "");
   out.push("## Dev tasks (hidden pass, paired)", "", "| task | family | hidden pass | change | false accept | compliance | tokens | noise between baselines | |", "|---|---|---|---|---|---|---|---|---|");
   for (const d of c.dev) out.push(`| ${d.task} | ${d.family} | ${arrow(d.base.hidden_pass, d.cand.hidden_pass)} | ${sign(d.delta)} | ${arrow(d.base.false_accept, d.cand.false_accept)} | ${arrow(d.base.compliance, d.cand.compliance)} | ${k(d.base.tokens_total)} -> ${k(d.cand.tokens_total)} | ${d.noise === null ? "-" : sign(d.noise)} | ${d.verdict === "same" ? "" : d.verdict} |`);
@@ -141,6 +268,19 @@ export function renderComparison(c: Comparison): string {
   out.push(`| all runs | ${arrow(c.overall.base.hidden_pass, c.overall.cand.hidden_pass)} | ${arrow(c.overall.base.false_accept, c.overall.cand.false_accept)} | ${arrow(c.overall.base.first_try, c.overall.cand.first_try)} | ${arrow(c.overall.base.compliance, c.overall.cand.compliance)} |`);
   if (c.heldout) out.push(`| held-out (aggregate) | ${arrow(c.heldout.base.hidden_pass, c.heldout.cand.hidden_pass)} (${sign(c.heldout.delta)}, ${c.heldout.ok ? "within tolerance" : "REGRESSED"}) | ${arrow(c.heldout.base.false_accept, c.heldout.cand.false_accept)} | ${arrow(c.heldout.base.first_try, c.heldout.cand.first_try)} | ${arrow(c.heldout.base.compliance, c.heldout.cand.compliance)} |`);
   out.push("", c.token_ratio !== null ? `Mean tokens per run: x${c.token_ratio} of baseline.` : "", "");
+  if (c.final) {
+    const f = c.final;
+    out.push(`## Final statistic (paired over tasks, one-sided, alpha ${f.alpha})`, "",
+      `- dev improvement: mean per-task change ${sign(f.dev.mean_diff)} over ${f.dev.n} task(s); exact sign-flip p = ${f.dev.p_improve} (${f.dev.significant ? "significant" : "not significant"})`,
+      f.heldout ? `- held-out non-inferiority: mean per-task change ${sign(f.heldout.mean_diff)} over ${f.heldout.n} task(s); margin ${f.heldout.margin}; p = ${Math.round(f.heldout.p * 1000) / 1000} (${f.heldout.non_inferior ? "non-inferiority shown" : "not shown"})` : "- held-out non-inferiority: not tested (guard not applied)", "");
+  }
+  const g = c.heldout;
+  if (g) {
+    const src = g.tolerance_source === "derived" ? `derived from baselines ${g.noise_runs.join(" and ")}: noise SE ${g.noise_se}, 1.5 x SE clamped to ${TOL_FLOOR}-${TOL_CAP}` : g.tolerance_source === "explicit" ? "set explicitly" : "default (no two baselines of identical code to measure noise from)";
+    out.push(`Held-out guard: ${g.shared_tasks} task(s) common to both sides${g.base_only || g.cand_only ? ` (${g.base_only} only in the baselines, ${g.cand_only} only in the candidate: not pooled)` : ""}; tolerance ${g.tolerance}, ${src}.`, "");
+  }
+  const l = c.opts.looks;
+  if (l) out.push(`Held-out looks: this lineage ${l.lineage_used}/${l.lineage_budget} (${l.lineage_left} left); all lineages ${l.total_used}/${l.total_budget} since the last rotation (${l.total_left} left).${l.reason ? ` REFUSED: ${l.reason}.` : ""}`, "");
   return out.join("\n");
 }
 
@@ -155,25 +295,20 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const base = get("baseline")?.split(",").map((s) => s.trim()).filter(Boolean);
   const cand = get("candidate");
   if (!base?.length || !cand) {
-    console.error("usage: node eval/compare.ts --baseline a,b --candidate c [--min-net 2] [--delta 0.4] [--heldout-tol 0.1]");
+    console.error("usage: node eval/compare.ts --baseline a,b --candidate c [--min-net 2] [--delta 0.4] [--heldout-tol 0.1] [--final]");
     process.exit(1);
   }
-  // Every comparison that shows the held-out aggregate spends one look for that candidate; the budget is pre-registered.
-  const budget = Number(get("heldout-budget") ?? 4);
-  const lookFile = path.join(runs, "heldout-looks.json");
-  let looks: Record<string, number> = {};
+  // Every comparison that shows the held-out aggregate spends one look, keyed by the candidate's lineage (the src/ tree it was
+  // cut from, from its manifest). A run with no lineage falls back to its own id, which is the weakest key and says so.
+  let candLineage = `run:${path.basename(dir(cand))}`;
   try {
-    looks = JSON.parse(fs.readFileSync(lookFile, "utf8")) as Record<string, number>;
+    const m = JSON.parse(fs.readFileSync(path.join(dir(cand), "manifest.json"), "utf8")) as { lineage?: string | null };
+    if (m.lineage) candLineage = m.lineage;
   } catch {
-    /* first look */
+    /* no manifest: keyed by run id */
   }
-  const used = looks[path.basename(dir(cand))] ?? 0;
-  const ignoreHeldout = used >= budget;
-  if (!ignoreHeldout) {
-    looks[path.basename(dir(cand))] = used + 1;
-    fs.writeFileSync(lookFile, JSON.stringify(looks, null, 2));
-  }
-  const result = compareRuns(base.map(dir), dir(cand), { minNet: Number(get("min-net") ?? 2), delta: Number(get("delta") ?? 0.4), heldoutTol: Number(get("heldout-tol") ?? 0.1), ignoreHeldout });
+  const look = spendLook(path.join(runs, "heldout-looks.json"), candLineage, Number(get("heldout-budget") ?? 4), Number(get("heldout-total") ?? 12));
+  const result = compareRuns(base.map(dir), dir(cand), { minNet: Number(get("min-net") ?? 2), delta: Number(get("delta") ?? 0.4), ...(get("heldout-tol") !== undefined ? { heldoutTol: Number(get("heldout-tol")) } : {}), ignoreHeldout: !look.allowed, looks: look, final: args.includes("--final") });
   const text = renderComparison(result);
   fs.writeFileSync(path.join(dir(cand), "compare.md"), text);
   console.log(text);

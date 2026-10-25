@@ -68,14 +68,23 @@ node eval/compare.ts --baseline baseline-M,baseline-K --candidate candidate-N
 The rule is fixed in advance and printed in the report:
 
 - A dev task is a **gain** when its hidden-pass mean rises by at least 0.4, a **loss** when it falls by at least 0.4 (`--delta`).
-- **KEEP** needs net (gains minus losses) of at least 2 (`--min-net`) and a held-out hidden-pass mean no more than 0.10 below baseline (`--heldout-tol`).
+- **KEEP** needs net (gains minus losses) of at least 2 (`--min-net`) and a held-out hidden-pass mean not below baseline by more than the tolerance (see below).
 - **REJECT** on a negative net, a held-out regression, or losses with no gain.
 - Anything else is **INCONCLUSIVE**: the direction may be right but the evidence is too thin. Add tasks or repeats; do not loosen the rule after seeing the result.
 
-Two guards against overfitting to held-out:
+**The held-out guard.**
 
-- Each comparison that shows the held-out aggregate spends one **look** for that candidate (`runs/heldout-looks.json`). After `--heldout-budget` looks (default 4) the held-out guard is not applied and the result cannot be KEEP.
-- A final confirmation set is not built yet. Until it exists, treat a KEEP as strong evidence, not proof, and say so in the merge request.
+- Held-out rows are pooled only over the tasks both sides ran. The report says how many were common and how many were left out; with none in common the guard is not applied and the result cannot be KEEP.
+- The tolerance is **measured, not chosen**: from the baselines you name on the command line that ran identical server code (equal `server_hash`), take the standard error of the per-task held-out gap, multiply by 1.5 and keep it between 0.05 and 0.15. With fewer than two such baselines it falls back to 0.10. `--heldout-tol` overrides it explicitly and the report says so. Name the baselines before you look at the candidate.
+- Looks are **keyed by lineage**: each comparison that shows the held-out aggregate spends one look, counted under the `src/` tree the candidate was cut from (recorded in its manifest as `lineage`), not under its run name. A lineage gets `--heldout-budget` looks (default 4) and all lineages together get `--heldout-total` (default 12) since the held-out set was last refreshed; the total binds. When either is spent the guard is not applied and the result cannot be KEEP. `runs/heldout-looks.json` holds the counts; the report prints looks used and left.
+
+**The final decision** (`--final`). Run it once, when you intend to act on the result. It adds two paired tests over tasks, because repeats of one task are not independent: the unit is each task's change in hidden-pass mean.
+
+- **Dev improvement:** an exact sign-flip test of "the mean per-task change is above zero", one-sided, alpha **0.10**. With few dev tasks this needs most of them to improve: two gains among five tasks gives p = 0.25, which is not significant.
+- **Held-out non-inferiority:** an exact sign-flip test of "the mean per-task change is above minus the tolerance", one-sided, alpha **0.10**. One common held-out task, or none, cannot show it.
+- A KEEP from the plain rule stays KEEP only if both tests pass; otherwise it becomes INCONCLUSIVE with the reason printed. A REJECT stays REJECT.
+
+A separate confirmation set for final decisions is specified in `Specs/fresh-holdout-exam/` and is not built yet. Until it exists, treat a KEEP as strong evidence, not proof, and say so in the merge request.
 
 Read `report.md` for false accepts and false rejects before you read the verdict: a candidate that improves pass rate but adds false accepts is not an improvement.
 
