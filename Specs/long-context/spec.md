@@ -1,0 +1,72 @@
+# Spec: using the 1M-token context window
+
+Status: draft v2 (after review by Opus 5.5 at high effort; all 19 findings addressed). Builds on `Specs/eval-system/`, `Specs/harder-evals/` and `Specs/fresh-holdout-exam/`. Baseline: server 0.9.0 plus the accepted candidates.
+
+## Research (2026-10-26)
+
+Facts, with where they come from:
+
+- The model in use is `deepseek-flash` = DeepSeek-V4.1-Flash-1017. Context length 1M tokens, maximum output 384K, thinking and non-thinking modes, tool calls supported. ([DeepSeek pricing page](https://api-docs.deepseek.com/quick_start/pricing))
+- Price is flat in context length: no long-context tier. Per 1M tokens at peak: input cache hit $0.006, input cache miss $0.30, output $1.20 (off-peak is half). A cache hit is 50 times cheaper than a miss. (same page; `eval/pricing.json` agrees)
+- The pricing page does not say how the cache is built or invalidated. Third-party listings (not DeepSeek) cite a 10 MB request cap and give max output as 384K or 393K. Treat both as unverified.
+- No published long-context quality figure for this model was found. Whether more context helps this harness has to be measured.
+
+What the server does today (`src/engine.ts`, `src/config.ts`, `src/context.ts`; checked in review):
+
+| limit | value | effect with a 1M window |
+|---|---|---|
+| `compact()` starts | 220,000 characters of `JSON.stringify(messages)` (escaped, without tool schemas). Roughly 55-70K tokens is an estimate; measured in T6 | about 6% of the window |
+| `compact()` cut | keeps the first two messages and the last six; scans from index 2; cuts a tool result to its first 3,000 characters plus a `[truncated N chars]` marker | see next row |
+| `compact()` repeats | mutates the persistent message array in place on every turn. A cut message is still over 3,000 characters (3,000 plus marker), so the next pass cuts it again: the marker reads `[truncated 12345 chars]`, then `[truncated 24 chars]`, then `[truncated 21 chars]`, stable only from the fourth visit. Each pass subtracts the marker's 21 characters from its running size without removing anything, and `cut` counts raw characters while `size` counts escaped JSON | once over budget, nearly every turn changes history from the oldest uncut tool result (or a recent marker) onward, so the provider re-bills everything from the first changed message at the miss price. This is true and worse than first stated |
+| `read_file` | 400 lines or 30,000 characters per call; a single longer line is sliced at the budget | a large file needs many calls |
+| any tool result | 45,000 characters; a larger JSON result becomes an error plus a preview cut mid-string | |
+| context pack | 6,000 characters (`CONTEXT_CHARS`; 0 disables) | small; untested whether more helps |
+| output | `MAX_TOKENS` 32,000 with thinking on; `reasoning_content` is passed back and never compacted | far below the 384K maximum |
+| time | `MAX_TURNS` 30, `REQUEST_TIMEOUT_MS` 300 s, job `TIMEOUT_MS` 900 s, runner `--task-timeout` 1200 s | a prompt near 1M tokens may exceed these |
+| request body | tool output is JSON inside JSON (`packResult`, then `JSON.stringify(body)`), so escapes double | 800K tokens is about 3.2M raw characters, a body of roughly 4-7 MB |
+| other caps | `DIFF_CHUNK`, `DIFF_CAP` 600, `run_tests` tail 60 lines, gate test tail 40 lines | |
+
+The server reads `prompt_tokens`, `prompt_cache_hit_tokens` and reasoning tokens from each reply and puts them in the trace; compaction ignores them.
+
+## Goal
+
+Let the harness use a large window sensibly: keep what the model has read instead of cutting it at 6% of the window, keep the provider's cache intact, and show with the eval whether that improves correctness or lowers cost. If it does not, say so and keep the current defaults.
+
+## Non-goals
+
+- No change of model, roles, gates, prompts or the allowed-paths rules.
+- No automatic stuffing of the whole repo into the prompt.
+- No model-written summaries of old context (a possible later step).
+- No change to the keep-rule thresholds, and no use of `confirm.ts` on setting arms (see AC-8).
+
+## Acceptance criteria
+
+- AC-1. Defaults unchanged. Every limit in the table above is a setting whose default is today's behaviour, including today's marker churn and mid-line slices ("legacy" mode). With no setting changed, `compact()` output and tool results are identical to before. Test oracle: a frozen copy of the old `compact()` in the test file, compared with the new code on synthetic conversations (there are no recorded ones; traces keep summaries only). Validation accepts 0 where 0 already has a meaning (`CONTEXT_CHARS`, `MAX_REPAIRS`) and for the new "off" values (`CONTEXT_TOKENS`, `COMPACT_LOW`, `JOB_INPUT_TOKEN_CAP`); other values must be positive integers under a hard ceiling.
+- AC-2. Token-aware compaction (a new mode, on only when `CONTEXT_TOKENS` is set). `CONTEXT_TOKENS` and `CONTEXT_WINDOW` must be set together; one without the other is refused at start-up. The budget must leave room for `MAX_TOKENS` plus a margin inside the window. The mode works from the last reported `prompt_tokens` plus an estimate for messages added since (using the measured characters-per-token ratio from T6), and falls back to characters when usage is missing.
+- AC-3. Cache-friendly compaction (new modes only). A message that was cut is marked and never changed again; the marker is fixed text; sizes are tracked in escaped JSON length consistently. With `COMPACT_LOW` set, compaction cuts oldest-first down to `budget * COMPACT_LOW` so it runs rarely. Test on a synthetic 40-turn conversation that grows past the budget: with the watermark set, the number of turns on which the earlier prefix changed is at most half of the number without it, and no cut message is ever modified again.
+- AC-4. Read and result caps (`read_file` characters and lines, tool result limit) are settings. In legacy (default) mode behaviour is unchanged. With a non-default value, paging works at every value and a result is cut only at a line boundary, except that a single line longer than the cap is cut with a visible marker.
+- AC-5. Job input-token guard. `JOB_INPUT_TOKEN_CAP` (default off). Before each request, if the cumulative reported input tokens (the last `prompt_tokens` added to the running sum) are already at or over the cap, the job ends like the turn limit does: it reaches the gates as an exhausted job (so the one-writer and commit rules are unchanged), with a clear reason and the cost in the report. The overshoot is at most one request.
+- AC-6. Observability. A trace event records each compaction (turn, messages cut, characters or tokens removed). `score.ts` reports per run and per task: peak prompt tokens, cache-hit share of input, number of compactions, repeat reads (a read whose path and line range overlaps an earlier read of the same path, not ordinary paging), reasoning tokens, `truncated` events, and timeouts. They appear in the report and compare tables. Traces from before this change still score.
+- AC-7. Evidence tasks. At least six extra-large dev tasks (hard tier, axis `long-context-xl`). The committed fixture is a small seed; the task's `setup.ts` expands it deterministically to 300,000-800,000 characters of original filler and commits the result in the temp repo (so the gates see a clean tree). Scenarios: a needle in a very large file; a cross-file change in a repo larger than the old compaction limit; a long job whose early reads matter after the old limit would have cut them; and three more varying these. Each has hidden checks, a reference, two decoys of different kinds. `task.json` records the expected size and sha256 of the expanded output and `--validate` checks it. Files edited by the reference or decoys stay small. The generator is part of the task-set hash. AC-13 of `Specs/harder-evals/` is amended to cover "seed plus generator", not the expanded repo.
+- AC-8. Dose-response experiment, with the decision made on one pre-registered comparison. Arms, all on the same server code and differing only in recorded settings: (a) baseline = defaults; (b) caps-only = defaults with raised read and result caps; (c) primary = token budget 250K with the watermark and matching caps; (d) top = budget derived from the measured request ceiling (AC-10), no higher than 800K. Run on the six XL tasks at k=10, plus the harder-evals long-context and larger-repo tasks and a regression slice at k=5. Only (c) vs (a) decides. (b) and (d) are reported, as attribution (is it the caps or the budget?) and as the dose-response curve, and carry no decision. Timeouts (`TIMEOUT_MS`, `REQUEST_TIMEOUT_MS`, the runner's task timeout) are raised identically in every arm including the baseline, and `JOB_INPUT_TOKEN_CAP` is set identically in every arm. The comparison uses `compare.ts --dev-only` (dev tasks, no held-out look is spent on exploration). A setting arm is never run through `confirm.ts`: confirmation would re-run both sides with the process environment (`confirm.ts:135`), ignoring the settings. Adopting a setting means changing defaults in a normal candidate branch, which has a new code hash and goes through the usual loop and confirmation. All of this spec's arms share one code lineage and so draw on that lineage's single held-out budget; settings do not buy new looks.
+- AC-9. Cost rule. A setting is adopted only if its hidden-pass result passes the keep rule AND (its mean cost per run is at most 1.5 times the baseline's, or the owner accepts the rise after seeing it). Cost uses the measured cache-hit and miss split and `eval/pricing.json`. The estimate before any spend (worst case about $8.35 for one 30-turn job at 800K tokens: 24M input tokens at $0.30 would be $7.20 all misses or $0.14 all hits, plus up to $1.15 output; multi-step tasks can multiply that; a realistic run at about 90% cache hits is near $0.70 per job) is written into the experiment plan, the run uses `--max-cost`, and a pilot at k=1 comes first. A cap that stops an arm half-way excludes that arm instead of scoring it. The $2 per run limit of `Specs/harder-evals/` AC-12 does not apply to this experiment; it has its own budget approved by the owner.
+- AC-10. Transport limits. The real request-size limit is probed against the API (needs the owner's approval to spend) before arm (d) is chosen; the top arm is derived from the measured ceiling. `chat()` checks the serialized body size before sending and refuses with a clear error above the configured ceiling (default 4 MB until measured). The longest turn latency at each arm is recorded.
+- AC-11. Settings reach the arms correctly. The new settings are added to the runner's allowlist so manifests record them; a per-task `env` override of any of them is refused by the loader (it is not recorded in the manifest and would hide a difference between arms).
+- AC-12. `npm test` stays green, new code has unit tests, `--validate` stays offline and within its time budget, and no safety rule is weakened (caps, denied paths, one writer, commit rules, key handling).
+
+## Constraints
+
+- TypeScript run by Node type stripping, erasable syntax only, no new runtime dependencies.
+- The API key stays in the proxy; any spend needs the owner's approval of an estimate.
+
+## Interaction with `Specs/harder-evals/`
+
+- The XL tasks should be authored before `harder-evals` T17 (calibration freeze), or that freeze is redone. They count in the task-set hash, along with their generator.
+- Calibrated at defaults they will probably be `floor` tasks. A floor task that rises still counts as a gain (right for this experiment); a floor task that falls is not counted as a loss, so these tasks cannot flag a regression by themselves. The regression slice carries that role.
+
+## Open questions
+
+- Q1. Which values become the defaults if a setting wins? (Owner's call after the experiment; applied as a normal candidate.)
+- Q2. Default for `JOB_INPUT_TOKEN_CAP` once adopted.
+- Q3. `src/config.ts` defaults the model to `deepseek-chat`; the pricing page lists `deepseek-flash`. Is `deepseek-chat` still a valid alias, and should the default change? Separate from this spec unless it affects the experiment.
+- Q4. Real request-size limit: answered by the probe in AC-10.
