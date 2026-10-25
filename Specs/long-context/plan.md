@@ -27,7 +27,7 @@ Verified present (review confirmed lines):
 - Built: `test/context-settings.test.ts` (settings, caps, guard, size check). Tests:  `test/repo.test.ts` (`packResult`), `test/eval-score.test.ts`, `test/eval-calibrate.test.ts`. `test/engine.test.ts`, `test/compact.test.ts` and `test/config.test.ts` do not exist yet and are created.
 
 New:
-- `src/compact.ts`, `test/compact.test.ts`, `test/config.test.ts`.
+- `src/compact.ts`, `test/compact.test.ts`. (Settings tests live in `test/context-settings.test.ts`.)
 - Six task folders under `eval/tasks/` with `setup.ts`; a generator module covered by the task-set hash.
 
 ## Data and API changes
@@ -40,7 +40,7 @@ New:
 ## Test strategy
 
 - `compact.test.ts`: a frozen copy of the old `compact()` as the oracle; legacy mode equals it on synthetic conversations (various sizes, tool result lengths, short lists); token mode with and without usage; fixed marker and no re-cut in new modes; watermark gives at most half as many prefix-changing turns on a 40-turn synthetic conversation; never touches the system message, the first user message or the last six; a malformed list does not throw.
-- `config.test.ts`: defaults equal today's constants; 0 accepted where it has a meaning and refused elsewhere; `CONTEXT_TOKENS` without `CONTEXT_WINDOW` refused; a budget with no room for `MAX_TOKENS` refused.
+- `context-settings.test.ts`: defaults equal today's constants; 0 accepted where it has a meaning and refused elsewhere; `CONTEXT_TOKENS` without `CONTEXT_WINDOW` refused; a budget with no room for `MAX_TOKENS` refused.
 - `read_file`: paging at default, 5x, 20x; line-boundary cuts in non-default mode only (AC-4). Job guard: a mock model asking for large reads ends with the cap reason, reaches the gates as exhausted, commit rules unchanged; with the cap off, unchanged (AC-5). Size check: `chat()` refuses an over-limit body.
 - Score tests: peak tokens, cache share, overlap-based repeat reads, old traces (AC-6).
 - Runner tests: settings recorded in manifest; per-task `env` for these settings refused (AC-11).

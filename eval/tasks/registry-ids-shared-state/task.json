@@ -30,15 +30,22 @@
     },
     {
       "type": "file_contains",
-      "name": "order-test-kept",
+      "name": "order-tests-verbatim",
       "path": "tests/registry.test.js",
-      "pattern": "\\['zeta', 'alpha'\\]"
+      "flags": "",
+      "pattern": "test\\('starts empty', \\(\\) => \\{\\r?\\n  assert\\.equal\\(size\\(\\), 0\\);\\r?\\n\\}\\);[\\s\\S]*?test\\('registers zeta first', \\(\\) => \\{\\r?\\n  register\\('zeta'\\);\\r?\\n  assert\\.equal\\(size\\(\\), 1\\);\\r?\\n\\}\\);[\\s\\S]*?test\\('registers alpha second', \\(\\) => \\{\\r?\\n  register\\('alpha'\\);\\r?\\n  assert\\.equal\\(size\\(\\), 2\\);\\r?\\n\\}\\);[\\s\\S]*?test\\('list keeps registration order', \\(\\) => \\{\\r?\\n  assert\\.deepEqual\\(list\\(\\), \\['zeta', 'alpha'\\]\\);\\r?\\n\\}\\);"
+    },
+    {
+      "type": "file_not_contains",
+      "name": "no-reset-hooks",
+      "path": "tests/registry.test.js",
+      "pattern": "\\b(beforeEach|afterEach|before|after|reset|clear)\\s*\\("
     },
     {
       "type": "file_pattern_count",
       "name": "tests-added",
       "path": "tests/registry.test.js",
-      "pattern": "^test\\(",
+      "pattern": "^\\s*(test|it)\\(",
       "flags": "gm",
       "min": 5
     }

@@ -19,7 +19,9 @@ import { McpClient } from "./lib/mcp.ts";
 import { SERVER_SETTINGS, TASK_ENV_SETTINGS, allowlistEnv } from "./lib/proc.ts";
 import { computeLineage, heldoutSetHash } from "./lib/lineage.ts";
 import { isPrivate, labelOf, runSubdir } from "./lib/privacy.ts";
-import { startProxy } from "./lib/proxy.ts";
+import { DEFAULT_UPSTREAM_TIMEOUT_MS, startProxy } from "./lib/proxy.ts";
+import { loadContextSettings } from "../src/config.ts";
+import type { ContextSettings } from "../src/config.ts";
 import { validateTasks } from "./lib/validate.ts";
 import { tierOf } from "./lib/types.ts";
 import type { LoadedTask, Pricing, Split, StepResult, Tier, UsageStats } from "./lib/types.ts";
@@ -149,7 +151,7 @@ const readRecord = (file: string): RunRecord | null => {
   }
 };
 
-const emptyUsage = (): UsageStats => ({ requests: 0, prompt: 0, completion: 0, reasoning: 0, cache_hit: 0, cost: 0, capped: false });
+const emptyUsage = (): UsageStats => ({ requests: 0, prompt: 0, completion: 0, reasoning: 0, cache_hit: 0, cost: 0, capped: false, upstream_failures: 0 });
 
 /** Print what would run and what it may cost. Costs come from a measured pilot (runs/last-usage.json), never a guess. */
 function describePlan(o: EvalOpts, tasks: LoadedTask[], skipped: LoadedTask[]): void {
@@ -167,6 +169,26 @@ function describePlan(o: EvalOpts, tasks: LoadedTask[], skipped: LoadedTask[]): 
   o.log(`cap: ${o.maxTokens !== undefined ? `${o.maxTokens.toLocaleString()} tokens` : "(none)"}${o.maxCost !== undefined ? `, $${o.maxCost}` : ""}`);
 }
 
+/** The settings the server under test will get: explicit defaults for the model, then every allowlisted variable (names matched without regard to case, as Windows does). */
+export function collectSettings(env: NodeJS.ProcessEnv): Record<string, string | undefined> {
+  const settings: Record<string, string | undefined> = { DEEPSEEK_MODEL: "deepseek-flash", DEEPSEEK_EFFORT: "high", DEEPSEEK_THINKING: "enabled" }; // explicit, so the manifest records what ran
+  for (const [k, v] of Object.entries(env)) {
+    const name = k.toUpperCase();
+    if (SERVER_SETTINGS.includes(name) && v !== undefined && v !== "") settings[name] = v;
+  }
+  return settings;
+}
+
+/** The context settings in effect for these server settings, validated the way the server will validate them. Throws, so a bad arm is refused before any money is spent. */
+export function effectiveContext(settings: Record<string, string | undefined>): ContextSettings {
+  const maxTokens = Number(settings.MAX_TOKENS || (settings.DEEPSEEK_THINKING === "disabled" ? 8000 : 32000));
+  try {
+    return loadContextSettings(settings as NodeJS.ProcessEnv, maxTokens);
+  } catch (e) {
+    throw new Error(`refused: ${(e as Error).message}`);
+  }
+}
+
 function readRecordJson(file: string): { runs: number; mean_tokens: number; mean_cost: number } | null {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8")) as { runs: number; mean_tokens: number; mean_cost: number };
@@ -181,6 +203,9 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
   const tasks = all.filter((t) => !t.needs_role);
   const runDir = path.join(o.runsDir, o.runId);
   describePlan(o, tasks, skipped);
+  const settings = collectSettings(o.serverEnv);
+  const effective = effectiveContext(settings);
+  o.log(`server settings: ${Object.entries(settings).map(([k, v]) => `${k}=${v}`).join(" ")}; context in effect: ${JSON.stringify(effective)}`);
   if (o.dryRun) return { runDir, records: [], planned: tasks.length * o.k, aborted: null };
 
   if (!o.apiKey) throw new Error("DEEPSEEK_API_KEY is not set (environment or eval/.env)");
@@ -205,8 +230,6 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
   const deps = path.join(o.rootDir, "node_modules");
   if (fs.existsSync(deps) && !fs.existsSync(path.join(serverDir, "node_modules"))) fs.symlinkSync(deps, path.join(serverDir, "node_modules"), "junction");
   const serverEntry = path.join(serverDir, "src", "server.ts");
-  const settings: Record<string, string | undefined> = { DEEPSEEK_MODEL: "deepseek-flash", DEEPSEEK_EFFORT: "high", DEEPSEEK_THINKING: "enabled" }; // explicit, so the manifest records what ran
-  for (const [k, v] of Object.entries(o.serverEnv)) if (SERVER_SETTINGS.includes(k) && v !== undefined) settings[k] = v;
   // A resumed run may cover other tasks than the first pass did: keep the union in the manifest. Facts about how the run
   // started (lineage, arm, purpose, the working tree's state, the held-out set) are kept from the first pass: a resume may
   // happen on another branch, and that must not change what the run is.
@@ -225,7 +248,7 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
       purpose: prevManifest?.purpose !== undefined ? prevManifest.purpose : o.purpose ?? null,
       heldout_hash: prevManifest?.heldout_hash !== undefined ? prevManifest.heldout_hash : held?.hash ?? null,
       heldout_count: prevManifest?.heldout_count !== undefined ? prevManifest.heldout_count : held?.count ?? null,
-      dirty: prevManifest?.dirty ?? Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null }, timeouts: { task_s: o.taskTimeoutS, upstream_s: o.upstreamTimeoutS ?? 330 },
+      dirty: prevManifest?.dirty ?? Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, effective_context: effective, task_env: Object.fromEntries(tasks.filter((t) => t.env && Object.keys(t.env).length).map((t) => [labelOf(t), t.env])), caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null }, timeouts: { task_s: o.taskTimeoutS, upstream_s: o.upstreamTimeoutS ?? DEFAULT_UPSTREAM_TIMEOUT_MS / 1000 },
       pricing: o.pricing ?? null, tasks: [...new Set([...(prevManifest?.tasks ?? []), ...tasks.map((t) => labelOf(t))])].sort(), skipped: skipped.map((t) => ({ id: labelOf(t), needs_role: t.needs_role })),
     }, null, 2)
   );
@@ -400,6 +423,11 @@ function oneOf<T extends string>(v: string | true | undefined, allowed: readonly
   throw new Error(`${flag} must be one of: ${allowed.join(", ")}`);
 }
 
+const positive = (n: number | undefined, flag: string): number | undefined => {
+  if (n !== undefined && !(n > 0)) throw new Error(`${flag} must be a positive number of seconds`);
+  return n;
+};
+
 async function main(): Promise<void> {
   loadEnvFile(path.join(HERE, ".env"));
   const a = parseArgs(process.argv.slice(2));
@@ -430,8 +458,8 @@ async function main(): Promise<void> {
     maxCost: num(a["max-cost"]),
     arm: oneOf(a.arm, ["baseline", "candidate"], "--arm"),
     purpose: oneOf(a.purpose, ["calibration", "comparison"], "--purpose"),
-    taskTimeoutS: num(a["task-timeout"]) ?? 1200,
-    upstreamTimeoutS: num(a["upstream-timeout"]),
+    taskTimeoutS: positive(num(a["task-timeout"]), "--task-timeout") ?? 1200,
+    upstreamTimeoutS: positive(num(a["upstream-timeout"]), "--upstream-timeout"),
     resume: a.resume === true,
     allowDirty: a["allow-dirty"] === true,
     apiKey: process.env.DEEPSEEK_API_KEY ?? "",

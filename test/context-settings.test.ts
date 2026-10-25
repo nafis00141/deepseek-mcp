@@ -3,7 +3,10 @@ import { after, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { bodies, CFG, cleanup, finalDone, gitOut, mkJob, mkRes, mkTask, put, resetRepo, script, sh, tmp, toolCall } from "./helpers.ts";
-import { CONTEXT_MARGIN_TOKENS, loadContextSettings } from "../src/config.ts";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { COMPACTION_BUILT, CONTEXT_MARGIN_TOKENS, configProblem, loadContextSettings } from "../src/config.ts";
+import { summarizeResult } from "../src/trace.ts";
 import { capsFor, executeTool, packResult, runAgent } from "../src/engine.ts";
 import { gate } from "../src/gates.ts";
 import { commit, snapshot } from "../src/repo.ts";
@@ -32,20 +35,40 @@ describe("context settings: loading and validation", () => {
       contextMode: "legacy", compactChars: 220000, compactLow: 0, contextTokens: 0, contextWindow: 0,
       readBudgetChars: 30000, readMaxLines: 400, resultLimitChars: 45000, maxRequestBytes: 0, jobInputTokenCap: 0,
     });
+    assert.equal(configProblem, null, "the test environment sets no bad context setting");
     // the running server was started with the test environment, which sets none of them
     assert.deepEqual([CFG.contextMode, CFG.compactChars, CFG.readBudgetChars, CFG.readMaxLines, CFG.resultLimitChars, CFG.jobInputTokenCap, CFG.maxRequestBytes], ["legacy", 220000, 30000, 400, 45000, 0, 0]);
   });
 
+  it("until the new compaction modes exist, settings only they would read are refused; MAX_TOKENS must be a number", () => {
+    assert.equal(COMPACTION_BUILT, false);
+    for (const e of [{ COMPACT_CHARS: "500000" }, { COMPACT_LOW: "0.7" }, { CONTEXT_MODE: "extended", CONTEXT_TOKENS: "250000", CONTEXT_WINDOW: "1000000" }]) {
+      assert.throws(() => loadContextSettings(e, 32000), /is not supported yet \(the new compaction modes are not built\)/, JSON.stringify(e));
+    }
+    assert.doesNotThrow(() => loadContextSettings({ CONTEXT_MODE: "extended", READ_MAX_LINES: "2000", JOB_INPUT_TOKEN_CAP: "5" }, 32000), "the settings that do something are accepted");
+    assert.doesNotThrow(() => loadContextSettings({ COMPACT_CHARS: "220000" }, 32000), "the default value is not a change");
+    assert.throws(() => loadContextSettings({}, Number.NaN), /MAX_TOKENS must be a positive number/);
+  });
+
+  it("the server refuses to start on a bad setting, before it touches the jobs folder", () => {
+    const root = fs.mkdtempSync(path.join(tmp, "refuse-"));
+    const env = { ...process.env, REPO_ROOT: root, JOB_INPUT_TOKEN_CAP: "-5", DEEPSEEK_API_KEY: "" };
+    const r = spawnSync(process.execPath, [path.join(import.meta.dirname, "..", "src", "server.ts")], { env, encoding: "utf8", timeout: 30000 });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /invalid context settings: JOB_INPUT_TOKEN_CAP="-5"/);
+    assert.equal(fs.existsSync(path.join(root, "specs")), false, "no jobs folder was created or reaped");
+  });
+
   it("an empty variable counts as unset; valid values are read", () => {
-    assert.equal(loadContextSettings({ COMPACT_CHARS: "", CONTEXT_MODE: "  " }, 32000).compactChars, 220000);
-    const s = loadContextSettings({ CONTEXT_MODE: "Extended", COMPACT_CHARS: "1500000", COMPACT_LOW: "0.7", READ_BUDGET_CHARS: "200000", READ_MAX_LINES: "5000", RESULT_LIMIT_CHARS: "300000", MAX_REQUEST_BYTES: "4000000", JOB_INPUT_TOKEN_CAP: "6000000", CONTEXT_TOKENS: "250000", CONTEXT_WINDOW: "1000000" }, 32000);
+    assert.equal(loadContextSettings({ COMPACT_CHARS: "", CONTEXT_MODE: "  " }, 32000, true).compactChars, 220000);
+    const s = loadContextSettings({ CONTEXT_MODE: "Extended", COMPACT_CHARS: "1500000", COMPACT_LOW: "0.7", READ_BUDGET_CHARS: "200000", READ_MAX_LINES: "5000", RESULT_LIMIT_CHARS: "300000", MAX_REQUEST_BYTES: "4000000", JOB_INPUT_TOKEN_CAP: "6000000", CONTEXT_TOKENS: "250000", CONTEXT_WINDOW: "1000000" }, 32000, true);
     assert.deepEqual([s.contextMode, s.compactChars, s.compactLow, s.readBudgetChars, s.readMaxLines, s.resultLimitChars, s.maxRequestBytes, s.jobInputTokenCap, s.contextTokens, s.contextWindow], ["extended", 1500000, 0.7, 200000, 5000, 300000, 4000000, 6000000, 250000, 1000000]);
   });
 
   it("refuses bad values and names every one of them", () => {
     const err = (e: Record<string, string>, mt = 32000): string => {
       try {
-        loadContextSettings(e, mt);
+        loadContextSettings(e, mt, true);
       } catch (x) {
         return (x as Error).message;
       }
@@ -68,7 +91,7 @@ describe("context settings: loading and validation", () => {
   it("the token budget and the window must be set together and leave room for the reply", () => {
     const err = (e: Record<string, string>, mt = 32000): string => {
       try {
-        loadContextSettings(e, mt);
+        loadContextSettings(e, mt, true);
       } catch (x) {
         return (x as Error).message;
       }
@@ -135,6 +158,17 @@ describe("read and result caps", () => {
     });
   });
 
+  it("in extended mode an oversize result is previewed up to a line boundary; the read_file trace summary carries from and to", async () => {
+    const lines = Array.from({ length: 4000 }, (_, i) => `row ${i} ${"p".repeat(10)}`);
+    const text = JSON.stringify({ content: lines.join("\n") });
+    assert.ok(text.length > 45000);
+    const legacy = JSON.parse(packResult({ content: lines.join("\n") })) as { preview: string };
+    const ext = await withCfg({ contextMode: "extended" }, () => JSON.parse(packResult({ content: lines.join("\n") })) as { preview: string });
+    assert.match(ext.preview, /row \d+ p{10}$/, "ends on a whole line, not inside it");
+    assert.ok(ext.preview.length <= legacy.preview.length);
+    assert.equal(summarizeResult({ path: "a", from: 401, to: 800, total_lines: 3000 }), "total_lines=3000 from=401 to=800");
+  });
+
   it("the tool result limit is a setting; an oversize result stays valid JSON", async () => {
     const parsed = JSON.parse(packResult({ x: "a".repeat(60000) })) as { error: string };
     assert.match(parsed.error, /result too large/);
@@ -173,6 +207,15 @@ describe("job input-token guard and request size check", () => {
     assert.doesNotMatch((out.reasons ?? []).join("|"), /MAX_TURNS/);
     const turns = await gate(job, mkRes({ exhausted: true, exhaustedReason: "turns" }));
     assert.match((turns.reasons ?? []).join("|"), /hit MAX_TURNS/);
+  });
+
+  it("a final answer that fails its self-check is not given a repair turn once the input cap is reached", async () => {
+    const verify = async () => ({ why: "x", message: "fix it" });
+    script.push({ ...finalDone, usage: usage(50) }, { ...finalDone, usage: usage(5) });
+    const out = await withCfg({ jobInputTokenCap: 30 }, () => runAgent({ prompt: "go", caps: implCaps(), logPath: logPath(), verify }));
+    assert.equal(out.repairs.length, 0, "no repair turn was started");
+    assert.equal(out.exhausted, false, "the final answer is kept, not thrown away");
+    assert.equal(out.finalText.includes("Done."), true);
   });
 
   it("refuses to send a request body over MAX_REQUEST_BYTES, and sends nothing", async () => {

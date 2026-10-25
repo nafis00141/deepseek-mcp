@@ -9,7 +9,7 @@ src/cart.js, src/subscription.js and src/invoice.js each carry their own copy of
 ## Acceptance criteria
 - AC-1. src/pricing/discount.js exports parseRule(text), returning { kind: 'percent', percent } or { kind: 'fixed', cents } for a rule such as '10%' or '5.00', and null when the text is not a number.
 - AC-2. src/pricing/discount.js exports discountCents(amountCents, ruleText, options): the discount in whole cents, never more than the amount, 0 when the rule cannot be parsed; options.rounding is 'nearest' (the default) or 'floor'.
-- AC-3. cart.js, subscription.js and invoice.js use that module and no longer parse rules themselves.
+- AC-3. cart.js, subscription.js and invoice.js use modules under src/pricing/ and no longer parse rules themselves.
 - AC-4. The public functions of the three modules behave exactly as before.
 
 ## Constraints

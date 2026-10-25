@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import type { LookResult } from "./lib/looks.ts";
 import { spendLook } from "./lib/looks.ts";
 import { frozenProblem, loadBands } from "./lib/calibration.ts";
+import { CONTEXT_SETTINGS } from "./lib/proc.ts";
 import { loadTasks } from "./lib/fixture.ts";
 import { isPrivate } from "./lib/privacy.ts";
 import { nonInferiority, signFlipPValue } from "./lib/stats.ts";
@@ -99,6 +100,12 @@ export interface Comparison {
   final: FinalStats | null;
   overall: { base: Aggregate; cand: Aggregate };
   token_ratio: number | null;
+  /** mean cost per run, candidate over baseline, on the compared rows (the pricing file prices the proxy's usage); null when the baseline has no cost data */
+  cost_ratio: number | null;
+  /** share of dev runs excluded as incomplete (timeouts, infrastructure, caps) per side; a large gap makes a verdict unfair */
+  exclusion: { base: number; cand: number; ok: boolean };
+  /** set when the baseline and candidate manifests differ in a server setting other than the context settings, or in a task env */
+  settings_problem: string | null;
   decision: "KEEP" | "REJECT" | "INCONCLUSIVE";
   reasons: string[];
 }
@@ -180,6 +187,12 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   }
   const cand = scoreRun(candidateDir);
   const baseRows = bases.flatMap((b) => b.rows);
+  // A filter that matches nothing would give an empty comparison and a quiet INCONCLUSIVE: refuse it instead.
+  const seenRows = [...baseRows, ...cand.rows].filter((r) => !isPrivate(r.split));
+  for (const [flag, wanted, have] of [["--axis", opts.axes, new Set(seenRows.map((r) => r.axis))], ["--exclude-axis", opts.excludeAxes, new Set(seenRows.map((r) => r.axis))], ["--tasks", opts.tasks, new Set(seenRows.map((r) => r.task))]] as const) {
+    const missing = (wanted ?? []).filter((w) => !have.has(w));
+    if (missing.length) throw new Error(`${flag}: no dev run has ${missing.join(", ")}`);
+  }
   // Only dev drives gains and losses and only held-out is the regression guard; confirm and reserve rows belong to neither.
   const devOf = (rows: RunRow[]): RunRow[] =>
     rows.filter((r) => !isPrivate(r.split) && (!opts.tier || r.tier === opts.tier) && (!opts.axes || (r.axis !== null && opts.axes.includes(r.axis))) && !(r.axis !== null && opts.excludeAxes?.includes(r.axis)) && (!opts.tasks || opts.tasks.includes(r.task)));
@@ -246,7 +259,7 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
     if (heldout && !heldout.ok) reasons.push(`held-out hidden-pass fell by ${Math.abs(heldout.delta)} (tolerance ${heldout.tolerance}, ${heldout.tolerance_source})`);
   } else if (net >= opts.minNet && net_clean >= opts.minNet) {
     decision = "KEEP";
-    reasons.push(`net ${net} >= ${opts.minNet}${net_clean !== net ? ` and ${net_clean} without tasks authored after a result` : ""} with the held-out guard intact`);
+    reasons.push(`net ${net} >= ${opts.minNet}${net_clean !== net ? ` and ${net_clean} without tasks authored after a result` : ""} with ${opts.devOnly ? "no held-out guard (dev-only screening)" : "the held-out guard intact"}`);
   } else if (net >= opts.minNet) {
     decision = "INCONCLUSIVE";
     reasons.push(`net ${net} reaches ${opts.minNet} only with tasks authored after a result was seen; without them it is ${net_clean}`);
@@ -260,6 +273,45 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   }
   if (heldout_problem) {
     reasons.push(`${heldout_problem}; this cannot be KEEP`);
+    if (decision === "KEEP") decision = "INCONCLUSIVE";
+  }
+  // A side that loses more runs to timeouts or infrastructure than the other is flattered by it: refuse a verdict across a wide gap.
+  const filtered = Boolean(opts.devOnly || opts.tier || opts.axes || opts.excludeAxes || opts.tasks);
+  const keptTasks = new Set(devOf([...baseRows, ...cand.rows]).map((r) => r.task));
+  const rate = (excluded: { task: string; split: string }[], rows: RunRow[]): number => {
+    const ex = excluded.filter((e) => !isPrivate(e.split) && (!filtered || keptTasks.has(e.task))).length;
+    const n = (filtered ? devOf(rows) : rows.filter((r) => !isPrivate(r.split))).length;
+    return ex + n > 0 ? r3(ex / (ex + n)) : 0;
+  };
+  const exBase = rate(bases.flatMap((b) => b.excluded), baseRows);
+  const exCand = rate(cand.excluded, cand.rows);
+  const exclusion = { base: exBase, cand: exCand, ok: Math.abs(exBase - exCand) <= 0.1 };
+  if (!exclusion.ok) {
+    reasons.push(`runs excluded as incomplete: ${Math.round(exBase * 100)}% of baseline runs against ${Math.round(exCand * 100)}% of candidate runs; the gap is over 10 points, so this cannot be KEEP`);
+    if (decision === "KEEP") decision = "INCONCLUSIVE";
+  }
+  // Arms must differ only in what the comparison is about: compare the recorded server settings and task env.
+  let settings_problem: string | null = null;
+  const manifestOf = (dir: string): { settings?: Record<string, string>; task_env?: unknown } | null => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8")) as { settings?: Record<string, string>; task_env?: unknown };
+    } catch {
+      return null;
+    }
+  };
+  const cm = manifestOf(candidateDir);
+  if (cm?.settings) {
+    const diffs = new Set<string>();
+    for (const dir of baselineDirs) {
+      const bm = manifestOf(dir);
+      if (!bm?.settings) continue;
+      for (const k of new Set([...Object.keys(bm.settings), ...Object.keys(cm.settings)])) if (!CONTEXT_SETTINGS.includes(k) && bm.settings[k] !== cm.settings[k]) diffs.add(k);
+      if (JSON.stringify(bm.task_env ?? {}) !== JSON.stringify(cm.task_env ?? {})) diffs.add("task env");
+    }
+    if (diffs.size) settings_problem = `the baseline and candidate runs differ in ${[...diffs].join(", ")}, which are not context settings: the comparison is not like for like`;
+  }
+  if (settings_problem) {
+    reasons.push(`${settings_problem}; this cannot be KEEP`);
     if (decision === "KEEP") decision = "INCONCLUSIVE";
   }
   // The final statistic is paired over tasks: repeats of one task are not independent, so the unit is the per-task change.
@@ -286,13 +338,18 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
       }
     }
   }
-  const bTok = mean(aggregate(baseRows).tokens_total);
-  const cTok = mean(aggregate(cand.rows).tokens_total);
+  const usedBase = filtered ? devOf(baseRows) : baseRows;
+  const usedCand = filtered ? devOf(cand.rows) : cand.rows;
+  const bTok = mean(aggregate(usedBase).tokens_total);
+  const cTok = mean(aggregate(usedCand).tokens_total);
   const token_ratio = bTok > 0 ? Math.round((cTok / bTok) * 100) / 100 : null;
+  const bCost = mean(aggregate(usedBase).cost);
+  const cost_ratio = bCost > 0 ? Math.round((mean(aggregate(usedCand).cost) / bCost) * 100) / 100 : null;
+  if (cost_ratio !== null && cost_ratio > 1.5) reasons.push(`cost rule: mean cost per run is x${cost_ratio} of the baseline, over 1.5; adoption needs the owner to accept the rise`);
   if (token_ratio !== null && token_ratio > 1.25) reasons.push(`cost warning: mean tokens per run rose ${Math.round((token_ratio - 1) * 100)}%`);
   const skipped = dev.filter((d) => !d.counted);
   if (skipped.length) reasons.push(`not counted: ${skipped.map((d) => `${d.task} (${d.verdict} on a ${d.band} task)`).join(", ")}`);
-  return { baselines: bases.map((b) => b.run_id), candidate: cand.run_id, opts, dev, gains, losses, net, net_clean, heldout, overall: { base: aggregate(baseRows), cand: aggregate(cand.rows) }, token_ratio, decision, reasons, heldout_problem, final };
+  return { baselines: bases.map((b) => b.run_id), candidate: cand.run_id, opts, dev, gains, losses, net, net_clean, heldout, overall: { base: aggregate(usedBase), cand: aggregate(usedCand) }, token_ratio, cost_ratio, exclusion, settings_problem, decision, reasons, heldout_problem, final };
 }
 
 const pct = (s: Stat | null): string => (s ? `${Math.round(s.mean * 100)}%` : "-");
@@ -304,14 +361,14 @@ export function renderComparison(c: Comparison): string {
   const out = [`# Compare - ${c.candidate} vs ${c.baselines.join(" + ")}`, ""];
   if (c.opts.devOnly) out.push("**SCREENING comparison: dev tasks only, no held-out guard, no look spent. A KEEP here is not a KEEP in the loop; the real decision is the candidate branch's normal comparison.**", "");
   out.push(`Rule: a dev task is a gain/loss when its hidden-pass mean moves by >= ${c.opts.delta}; KEEP needs net >= ${c.opts.minNet} and held-out within the tolerance below.`, "");
-  out.push(`## ${c.opts.devOnly ? "Screening verdict" : "Decision"}: ${c.decision}`, "", ...c.reasons.map((r) => `- ${r}`), "");
+  out.push(`## ${c.opts.devOnly ? "Screening verdict" : "Decision"}: ${c.opts.devOnly && c.decision === "KEEP" ? "SCREEN PASS (not a KEEP)" : c.decision}`, "", ...c.reasons.map((r) => `- ${r}`), "");
   out.push("## Dev tasks (hidden pass, paired)", "", "| task | tier | band | family | hidden pass | change | false accept | compliance | tokens | noise between baselines | |", "|---|---|---|---|---|---|---|---|---|---|---|");
   for (const d of c.dev) out.push(`| ${d.task} | ${d.tier}${d.after_result ? " (after result)" : ""} | ${d.band ?? "-"} | ${d.family} | ${arrow(d.base.hidden_pass, d.cand.hidden_pass)} | ${sign(d.delta)} | ${arrow(d.base.false_accept, d.cand.false_accept)} | ${arrow(d.base.compliance, d.cand.compliance)} | ${k(d.base.tokens_total)} -> ${k(d.cand.tokens_total)} | ${d.noise === null ? "-" : sign(d.noise)} | ${d.verdict === "same" ? "" : d.counted ? d.verdict : `${d.verdict} (not counted)`} |`);
   out.push("", `gains ${c.gains}, losses ${c.losses}, net ${c.net}; net without tasks authored after a result: ${c.net_clean}`, "");
   out.push("## Aggregates", "", "| | hidden pass | false accept | first try | compliance |", "|---|---|---|---|---|");
   out.push(`| all runs | ${arrow(c.overall.base.hidden_pass, c.overall.cand.hidden_pass)} | ${arrow(c.overall.base.false_accept, c.overall.cand.false_accept)} | ${arrow(c.overall.base.first_try, c.overall.cand.first_try)} | ${arrow(c.overall.base.compliance, c.overall.cand.compliance)} |`);
   if (c.heldout) out.push(`| held-out (aggregate) | ${arrow(c.heldout.base.hidden_pass, c.heldout.cand.hidden_pass)} (${sign(c.heldout.delta)}, ${c.heldout.ok ? "within tolerance" : "REGRESSED"}) | ${arrow(c.heldout.base.false_accept, c.heldout.cand.false_accept)} | ${arrow(c.heldout.base.first_try, c.heldout.cand.first_try)} | ${arrow(c.heldout.base.compliance, c.heldout.cand.compliance)} |`);
-  out.push("", c.token_ratio !== null ? `Mean tokens per run: x${c.token_ratio} of baseline.` : "", "");
+  out.push("", c.token_ratio !== null ? `Mean tokens per run: x${c.token_ratio} of baseline.${c.cost_ratio !== null ? ` Mean cost per run: x${c.cost_ratio}.` : ""} Runs excluded as incomplete: ${Math.round(c.exclusion.base * 100)}% baseline, ${Math.round(c.exclusion.cand * 100)}% candidate.` : "", "");
   if (c.final) {
     const f = c.final;
     out.push(`## Final statistic (paired over tasks, one-sided, alpha ${f.alpha})`, "",
@@ -356,6 +413,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const afterResult = new Set(loadTasks([path.join(evalDir, "tasks")], ["dev"]).filter((t) => t.authored_after_result === true).map((t) => t.id));
   const stale = frozenProblem(evalDir);
   const devOnly = args.includes("--dev-only");
+  if (devOnly && args.includes("--final")) {
+    console.error("--final needs the held-out guard and cannot be combined with --dev-only");
+    process.exit(1);
+  }
   const list = (k: string): string[] | undefined => get(k)?.split(",").map((s) => s.trim()).filter(Boolean);
   // A screening comparison reads no held-out rows, so it must not spend a look either.
   const look = devOnly ? { allowed: true, lineage_used: 0, lineage_budget: 0, lineage_left: 0, total_used: 0, total_budget: 0, total_left: 0, reason: "" } : spendLook(path.join(runs, "heldout-looks.json"), candLineage, Number(get("heldout-budget") ?? 4), Number(get("heldout-total") ?? 12));

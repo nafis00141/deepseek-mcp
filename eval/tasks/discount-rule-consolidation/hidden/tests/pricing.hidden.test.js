@@ -48,18 +48,12 @@ test('invoices keep rejecting bad rules', () => {
   assert.throws(() => invoiceAmount(1005, 'abc'), RangeError);
 });
 
-test('the rule is parsed in one place only', () => {
+test('the rule is parsed under pricing/, not in the three modules', () => {
   const root = path.join(__dirname, '..', 'src');
-  const holders = [];
-  (function walk(dir) {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (/parseFloat/.test(fs.readFileSync(p, 'utf8'))) holders.push(path.relative(root, p).split(path.sep).join('/'));
-    }
-  })(root);
-  assert.deepEqual(holders, ['pricing/discount.js']);
+  assert.ok(fs.readdirSync(path.join(root, 'pricing')).some((f) => f.endsWith('.js')));
   for (const f of ['cart.js', 'subscription.js', 'invoice.js']) {
-    assert.match(fs.readFileSync(path.join(root, f), 'utf8'), /require\((['"])\.\/pricing\/discount(\.js)?\1\)/, f + ' uses the shared module');
+    const text = fs.readFileSync(path.join(root, f), 'utf8');
+    assert.match(text, /require\((['"])\.\/pricing\/[\w./-]+\1\)/, f + ' uses a module under pricing/');
+    assert.doesNotMatch(text, /parseFloat|parseInt|\bNumber\(|\.endsWith\(|\.trim\(|\.replace\(|\.match\(|\.exec\(|\.test\(|new RegExp|\.slice\(/, f + ' parses nothing itself');
   }
 });

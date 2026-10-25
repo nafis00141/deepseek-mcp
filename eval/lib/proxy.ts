@@ -10,6 +10,9 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Pricing, UsageStats } from "./types.ts";
 
+/** How long the proxy waits for one upstream reply unless told otherwise. */
+export const DEFAULT_UPSTREAM_TIMEOUT_MS = 330000;
+
 export interface ProxyOpts {
   /** Base URL that /chat/completions is appended to, e.g. https://api.deepseek.com */
   upstream: string;
@@ -33,7 +36,7 @@ export interface Proxy {
   close(): Promise<void>;
 }
 
-const empty = (): UsageStats => ({ requests: 0, prompt: 0, completion: 0, reasoning: 0, cache_hit: 0, cost: 0, capped: false });
+const empty = (): UsageStats => ({ requests: 0, prompt: 0, completion: 0, reasoning: 0, cache_hit: 0, cost: 0, capped: false, upstream_failures: 0 });
 
 export function costOf(pricing: Pricing | undefined, prompt: number, hit: number, completion: number): number {
   if (!pricing) return 0;
@@ -81,7 +84,7 @@ export async function startProxy(opts: ProxyOpts): Promise<Proxy> {
             method: "POST",
             headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
             body,
-            signal: AbortSignal.timeout(opts.upstreamTimeoutMs ?? 330000),
+            signal: AbortSignal.timeout(opts.upstreamTimeoutMs ?? DEFAULT_UPSTREAM_TIMEOUT_MS),
           });
           const text = await up.text();
           try {
@@ -105,6 +108,12 @@ export async function startProxy(opts: ProxyOpts): Promise<Proxy> {
           }
           reply(up.status, text);
         } catch (e) {
+          // No usage came back, but a timed-out request may still be billed: charge an estimate (about 4 bytes a token, all cache misses) against the cap.
+          const est = costOf(opts.pricing, Math.ceil(Buffer.byteLength(body) / 4), 0, 0);
+          for (const t of [s.stats, totals]) {
+            t.upstream_failures = (t.upstream_failures ?? 0) + 1;
+            t.cost += est;
+          }
           reply(502, JSON.stringify({ error: `proxy upstream failure: ${(e as Error).message.slice(0, 200)}` }));
         }
       })();

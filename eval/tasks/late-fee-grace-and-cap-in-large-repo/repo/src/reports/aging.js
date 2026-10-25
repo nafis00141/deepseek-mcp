@@ -1,4 +1,4 @@
-const { daysLate, lateFee } = require('../billing/late-fee.js');
+const { daysLate, lateFee } = require('../billing/charges.js');
 
 // One row of the aging report.
 function agingRow(invoice, today) {

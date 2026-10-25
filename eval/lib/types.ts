@@ -100,4 +100,6 @@ export interface UsageStats {
   cache_hit: number;
   cost: number;
   capped: boolean;
+  /** upstream calls that timed out or failed with no usage reply; their cost is an estimate from the request size (they may still be billed) */
+  upstream_failures?: number;
 }

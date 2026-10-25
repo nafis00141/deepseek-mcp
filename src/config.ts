@@ -98,11 +98,18 @@ export interface ContextSettings {
 export const CONTEXT_MARGIN_TOKENS = 50000; // room kept below the window on top of MAX_TOKENS
 
 /**
+ * The token-aware and watermark compaction modes (Specs/long-context T2/T3) are not built yet. Until they are, settings that
+ * only they would read are refused, so that an arm can never record a setting that did nothing.
+ */
+export const COMPACTION_BUILT = false;
+
+/**
  * Read and validate the context settings from an environment. Throws one Error naming every bad variable, so a typo fails
  * at start-up instead of silently running with a different limit. An empty variable counts as unset.
  */
-export function loadContextSettings(e: NodeJS.ProcessEnv, maxTokens: number): ContextSettings {
+export function loadContextSettings(e: NodeJS.ProcessEnv, maxTokens: number, compactionBuilt: boolean = COMPACTION_BUILT): ContextSettings {
   const bad: string[] = [];
+  if (!Number.isFinite(maxTokens) || maxTokens < 1) bad.push(`MAX_TOKENS must be a positive number (got ${String(maxTokens)})`);
   const raw = (name: string): string | undefined => {
     const v = e[name];
     return v === undefined || String(v).trim() === "" ? undefined : String(v).trim();
@@ -140,6 +147,11 @@ export function loadContextSettings(e: NodeJS.ProcessEnv, maxTokens: number): Co
     maxRequestBytes: int("MAX_REQUEST_BYTES", 0, 0, 128_000_000),
     jobInputTokenCap: int("JOB_INPUT_TOKEN_CAP", 0, 0, 2_000_000_000),
   };
+  if (!compactionBuilt) {
+    for (const [name, set] of [["COMPACT_CHARS", s.compactChars !== 220000], ["COMPACT_LOW", s.compactLow !== 0], ["CONTEXT_TOKENS", s.contextTokens !== 0], ["CONTEXT_WINDOW", s.contextWindow !== 0]] as const) {
+      if (set) bad.push(`${name} is not supported yet (the new compaction modes are not built); remove it`);
+    }
+  }
   if ((s.contextTokens > 0) !== (s.contextWindow > 0)) bad.push("CONTEXT_TOKENS and CONTEXT_WINDOW must be set together");
   else if (s.contextTokens > 0 && s.contextMode !== "extended") bad.push("CONTEXT_TOKENS needs CONTEXT_MODE=extended");
   else if (s.contextTokens > 0 && s.contextTokens + maxTokens + CONTEXT_MARGIN_TOKENS > s.contextWindow) {

@@ -178,6 +178,11 @@ const blocked = (reason: string, extra: Record<string, unknown> = {}): CallToolR
 
 /* -------------------------------------------------------------------- server */
 
+// A bad setting must stop this server before it touches the jobs folder: reaping another server's running jobs would break the one-writer rule.
+if (configProblem) {
+  console.error(`[handoff] ${configProblem}`);
+  process.exit(1);
+}
 CFG.baseRef = detectBaseRef();
 ensureDirs();
 const reaped = reapStaleJobs();
@@ -492,9 +497,5 @@ server.tool(
 server.tool("jobs", "List recent handoffs with their state.", {}, async () => json(listJobs(12)));
 
 process.on("unhandledRejection", (e) => log("unhandled rejection:", String(e)));
-if (configProblem) {
-  console.error(`[handoff] ${configProblem}`);
-  process.exit(1);
-}
 await server.connect(new StdioServerTransport());
 log(`ready - repo=${CFG.repo} base=${CFG.baseRef} model=${CFG.model} roles=${ROLE_NAMES.length}`);

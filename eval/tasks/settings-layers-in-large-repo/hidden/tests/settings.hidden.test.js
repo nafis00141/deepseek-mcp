@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { resolveSettings } = require('../src/index.js');
+const { resolveSettings, loadLegacy } = require('../src/index.js');
 
 const defaults = { name: 'app', debug: false, tags: ['a', 'b'], server: { port: 80, hosts: ['h1', 'h2'], tls: { ciphers: ['x', 'y'], on: false } } };
 
@@ -51,4 +51,10 @@ test('the inputs are not modified', () => {
   assert.deepEqual(defaults.server.hosts, ['h1', 'h2']);
   assert.equal(defaults.server.port, 80);
   assert.deepEqual(file, { tags: ['c'], server: { hosts: ['h3'] } });
+});
+
+test('the archived-config loader still appends lists', () => {
+  assert.deepEqual(loadLegacy(defaults, { tags: ['c'] }).tags, ['a', 'b', 'c']);
+  assert.deepEqual(loadLegacy(defaults, { server: { hosts: ['h3'] } }).server.hosts, ['h1', 'h2', 'h3']);
+  assert.equal(loadLegacy(defaults, { name: 'x' }).name, 'x');
 });

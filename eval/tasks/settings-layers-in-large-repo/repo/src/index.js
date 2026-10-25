@@ -1,3 +1,3 @@
-const { resolveSettings } = require('./settings/resolve.js');
+const { resolveSettings, loadLegacy } = require('./settings/layers.js');
 
-module.exports = { resolveSettings };
+module.exports = { resolveSettings, loadLegacy };

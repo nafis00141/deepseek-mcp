@@ -1,5 +1,5 @@
 {
-  "kind": "wrong-rule",
+  "kind": "dead-copy-edit",
   "branch": "impl/01-ref",
   "steps": [
     {

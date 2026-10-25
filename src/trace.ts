@@ -56,6 +56,6 @@ export function classifyDenied(name: string, error: string | undefined): "write"
 export function summarizeResult(out: Record<string, unknown> & { error?: string }): string {
   if (out.error) return `ERROR ${String(out.error).slice(0, 160)}`;
   const bits: string[] = [];
-  for (const k of ["written", "edited", "bytes", "count", "total_lines", "pass"]) if (out[k] !== undefined) bits.push(`${k}=${String(out[k]).slice(0, 80)}`);
+  for (const k of ["written", "edited", "bytes", "count", "total_lines", "from", "to", "pass"]) if (out[k] !== undefined) bits.push(`${k}=${String(out[k]).slice(0, 80)}`);
   return bits.join(" ") || `ok (${JSON.stringify(out).length} chars)`;
 }

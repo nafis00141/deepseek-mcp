@@ -84,6 +84,13 @@ describe("refusals (nothing is run, nothing is logged)", () => {
     assert.equal(fs.existsSync(path.join(w.runsDir, "confirm-log.jsonl")), false);
   });
 
+  it("refuses two runs of the same server code: settings arms are screened, never confirmed", async () => {
+    const w = world("same-code");
+    put("same-code/runs/base/manifest.json", JSON.stringify({ server_hash: "hash-cand", lineage: "tree-L1" }));
+    await assert.rejects(runConfirm(baseOpts(w)), /ran the same server code; a confirmation compares two code versions/);
+    assert.equal(fs.existsSync(path.join(w.runsDir, "confirm-log.jsonl")), false);
+  });
+
   it("refuses an already confirmed server hash, a lineage that has used its look, and a spent total; a rotation marker restores the total", async () => {
     const entry = (over: Partial<ConfirmLogEntry>): string => JSON.stringify({ ts: "2026-01-01T00:00:00Z", type: "look", lineage: "other", candidate_hash: "x", ...over }) + "\n";
     const w1 = world("seen-hash");

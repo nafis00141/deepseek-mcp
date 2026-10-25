@@ -1,5 +1,4 @@
 // Retired constants and lookup tables.
-// Generated reference data and helpers; nothing in this file depends on the rest of the project.
 
 // Table 1: drutequa bradorsal entries.
 const TABLE_1 = [
@@ -578,7 +577,7 @@ class Window32 {
   }
 }
 
-module.exports = {
+Object.assign(module.exports, {
   TABLE_1,
   table1ByCode,
   table1Active,
@@ -627,4 +626,4 @@ module.exports = {
   convert30,
   check31,
   Window32,
-};
+});

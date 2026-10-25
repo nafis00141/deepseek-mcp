@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { daysLate, lateFee, agingRow } = require('../src/index.js');
+const { daysLate, lateFee, legacyLateFee, agingRow } = require('../src/index.js');
 
 const inv = (amountCents) => ({ id: 'X', amountCents, dueDate: '2026-02-01' });
 const on = (d) => '2026-02-' + String(d).padStart(2, '0');
@@ -34,6 +34,13 @@ test('daysLate counts calendar days, leap years included', () => {
   assert.equal(daysLate('2028-02-28', '2028-03-01'), 2);
   assert.equal(daysLate('2027-02-28', '2027-03-01'), 1);
   assert.throws(() => daysLate('soon', '2026-01-01'), /bad date/);
+});
+
+test('the archived v1 statements are unchanged', () => {
+  assert.equal(legacyLateFee(inv(10000), on(4)), 600);
+  assert.equal(legacyLateFee(inv(10000), on(11)), 2000);
+  assert.equal(legacyLateFee(inv(10000), '2026-06-01'), 24000);
+  assert.equal(legacyLateFee(inv(10000), '2026-01-20'), 0);
 });
 
 test('the aging report follows the rules', () => {

@@ -7,17 +7,19 @@ Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.
 | task | state |
 |---|---|
 | T1 settings | done (889b749); `loadContextSettings` and `configProblem` instead of a `loadConfig(env)` function |
-| T4 caps | done (889b749) |
+| T4 caps | done; extended mode also previews an oversize result up to a line boundary and the `read_file` trace summary carries from/to |
 | T5 guard and size check | done; size refusal ends as exhausted `request_size`; `context_budget` is added with T3 |
 | T7 runner, proxy, compare | done; `--upstream-timeout`, timeouts in the manifest, `task.env` refusal, `--dev-only` (SCREENING), `--axis`, `--exclude-axis`, `--tasks` |
-| T2, T3, T6, T8-T13 | not started |
+| compare fixes from review 4 | done: SCREEN PASS wording, unknown filter refused, filtered aggregates and cost ratio, exclusion-rate refusal (>10 points), like-for-like settings check, `--dev-only --final` refused; `confirm.ts` refuses two runs of the same server code and takes `--upstream-timeout`; the proxy charges an estimate for timed-out upstream calls against the cap and counts them; the runner validates the arm's context settings before spending and records the effective values and task env |
+| job guard | a final answer that fails its self-check no longer gets a repair turn once the cap is reached |
+| T2, T3, T6 (the rest), T8-T13 | not started |
 
 Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and `test/eval-calibrate.test.ts`. Full suite 274 tests, none failing.
 
 
 ## T1. Settings with unchanged defaults
-- Goal: add a testable `loadConfig(env)` and `CONTEXT_MODE` (`legacy`|`extended`), `COMPACT_CHARS`, `COMPACT_LOW`, `CONTEXT_TOKENS`, `CONTEXT_WINDOW`, `READ_BUDGET_CHARS`, `READ_MAX_LINES`, `RESULT_LIMIT_CHARS`, `MAX_REQUEST_BYTES` (default 0), `JOB_INPUT_TOKEN_CAP` to `src/config.ts`; each setting has its own type and range (0 where it means off or already has a meaning; `COMPACT_LOW` a fraction in (0,1]).
-- Files: `src/config.ts`, `test/config.test.ts` (new).
+- Goal: add a testable `loadContextSettings(env, maxTokens)` (plus `configProblem`, checked at server start-up before any folder is touched) and `CONTEXT_MODE` (`legacy`|`extended`), `COMPACT_CHARS`, `COMPACT_LOW`, `CONTEXT_TOKENS`, `CONTEXT_WINDOW`, `READ_BUDGET_CHARS`, `READ_MAX_LINES`, `RESULT_LIMIT_CHARS`, `MAX_REQUEST_BYTES` (default 0), `JOB_INPUT_TOKEN_CAP` to `src/config.ts`; each setting has its own type and range (0 where it means off or already has a meaning; `COMPACT_LOW` a fraction in (0,1]).
+- Files: `src/config.ts`, `src/server.ts`, `test/context-settings.test.ts`.
 - Done when: defaults equal today's constants; bad values, `CONTEXT_TOKENS` without `CONTEXT_WINDOW`, and a budget with no room for `MAX_TOKENS` fail at start-up with a clear message; `CONTEXT_CHARS=0` and `MAX_REPAIRS=0` still work. (AC-1, AC-2)
 
 ## T2. Legacy-exact compaction in its own module
@@ -28,7 +30,7 @@ Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and
 
 ## T3. Token-aware, cache-friendly compaction modes
 - Goal: extended mode: token budget (last `prompt_tokens` plus an estimate for new messages, falling back to characters), fixed marker, cut messages tracked in a side `WeakSet`, consistent escaped-JSON sizes, watermark cut-down, then ending the job as exhausted with reason `context_budget` if the budget is still unreachable (never dropping `reasoning_content`: the API answers 400 without it in a tool loop). Add `context_budget` to `exhaustedReason`, the gate text and `engine.ts`.
-- Files: `src/compact.ts`, `test/compact.test.ts`.
+- Files: `src/compact.ts`, `src/engine.ts`, `src/types.ts` (`exhaustedReason` gains `context_budget`), `src/gates.ts` (gate text), `src/config.ts` (flip `COMPACTION_BUILT`), `test/compact.test.ts`.
 - Done when: works with usage and without; no cut message is ever changed again and no marker field reaches the request body; on a synthetic 40-turn conversation the watermark gives at most half as many prefix-changing turns as no watermark; first two and last six messages untouched; the unreachable-budget path ends as `context_budget` and is tested. (AC-2, AC-3)
 - Depends on: T2.
 

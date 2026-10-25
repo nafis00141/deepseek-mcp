@@ -37,21 +37,36 @@ interface RunSpec {
   /** task id -> one boolean per repeat: did the hidden checks pass */
   tasks: Record<string, boolean[]>;
   tier?: Record<string, "hard" | "regression">;
+  /** server settings recorded in the manifest */
+  settings?: Record<string, string>;
+  /** task id -> how many extra runs ended incomplete (capped) and so are excluded from scoring */
+  capped?: Record<string, number>;
+  /** per-run cost in dollars (default 0.01) */
+  cost?: number;
 }
 
 function mkRun(id: string, s: RunSpec): string {
   const runDir = path.join(root, "runs", id);
-  put(path.join(runDir, "manifest.json"), JSON.stringify({ settings: {}, k: 5, server_hash: s.hash ?? "same-code", arm: s.arm === undefined ? "baseline" : s.arm, purpose: s.purpose === undefined ? "comparison" : s.purpose }));
+  put(path.join(runDir, "manifest.json"), JSON.stringify({ settings: s.settings ?? {}, k: 5, server_hash: s.hash ?? "same-code", arm: s.arm === undefined ? "baseline" : s.arm, purpose: s.purpose === undefined ? "comparison" : s.purpose }));
   for (const [task, passes] of Object.entries(s.tasks)) {
     passes.forEach((pass, i) => {
       const rec: RunRecord = {
         complete: true, status: "ok", task, k: i + 1, family: "code", tier: s.tier?.[task] ?? "hard", ...(s.tier?.[task] === "regression" ? {} : { axis: "long-context" }), split: "dev", expect: { gate: "done" }, gate_status: "done",
         steps: [{ step: 1, role: "impl", job_id: "aaaaaaaa", status: "done", infra: false }],
         checks: [{ name: "hidden", type: "x", pass, detail: "", compliance: false }],
-        usage: { requests: 1, prompt: 1000, completion: 500, reasoning: 0, cache_hit: 0, cost: 0.01, capped: false }, wall_s: 5,
+        usage: { requests: 1, prompt: 1000, completion: 500, reasoning: 0, cache_hit: 0, cost: s.cost ?? 0.01, capped: false }, wall_s: 5,
       };
       put(path.join(runDir, task, String(i + 1), "checks.json"), JSON.stringify(rec));
     });
+  }
+  for (const [task, n] of Object.entries(s.capped ?? {})) {
+    for (let i = 0; i < n; i++) {
+      const rec: RunRecord = {
+        complete: false, status: "capped", task, k: 100 + i, family: "code", tier: "hard", axis: "long-context", split: "dev", expect: { gate: "done" }, gate_status: null,
+        steps: [], checks: [], usage: { requests: 1, prompt: 1, completion: 1, reasoning: 0, cache_hit: 0, cost: 0, capped: true }, wall_s: 1,
+      };
+      put(path.join(runDir, task, String(100 + i), "checks.json"), JSON.stringify(rec));
+    }
   }
   return runDir;
 }
@@ -192,10 +207,63 @@ describe("compare: bands and provenance", () => {
     const before = fs.existsSync(looks) ? fs.readFileSync(looks, "utf8") : null;
     const cli = spawnSync(process.execPath, [path.join(import.meta.dirname, "..", "eval", "compare.ts"), "--baseline", b, "--candidate", c, "--dev-only", "--axis", "long-context"], { encoding: "utf8" });
     assert.equal(cli.status, 0, cli.stderr);
-    assert.match(cli.stdout, /## Screening verdict: KEEP/);
+    assert.match(cli.stdout, /## Screening verdict: SCREEN PASS \(not a KEEP\)/);
     assert.equal(fs.existsSync(path.join(c, "compare-screening.md")), true);
     assert.equal(fs.existsSync(path.join(c, "compare.md")), false);
     assert.equal(fs.existsSync(looks) ? fs.readFileSync(looks, "utf8") : null, before, "the look budget file is untouched");
+  });
+
+  it("a filter that matches nothing is refused, and a screening KEEP reads as SCREEN PASS", () => {
+    const b = base("t6b9", { x1: rate(0, 5) });
+    const c = base("t6c9", { x1: rate(5, 5), x2: rate(5, 5) });
+    assert.throws(() => compareRuns([b], c, opts({ devOnly: true, axes: ["no-such-axis"] })), /--axis: no dev run has no-such-axis/);
+    assert.throws(() => compareRuns([b], c, opts({ devOnly: true, tasks: ["x1", "ghost"] })), /--tasks: no dev run has ghost/);
+    assert.throws(() => compareRuns([b], c, opts({ devOnly: true, excludeAxes: ["nope"] })), /--exclude-axis/);
+    const two = compareRuns([base("t6b9b", { x1: rate(0, 5), x2: rate(0, 5) })], c, opts({ devOnly: true }));
+    assert.equal(two.decision, "KEEP");
+    assert.match(renderComparison(two), /## Screening verdict: SCREEN PASS \(not a KEEP\)/);
+    assert.doesNotMatch(renderComparison(two), /Screening verdict: KEEP/);
+  });
+
+  it("the --dev-only command line refuses --final", () => {
+    const b = base("t6b10", { x1: rate(0, 5) });
+    const c = base("t6c10", { x1: rate(5, 5) });
+    const cli = spawnSync(process.execPath, [path.join(import.meta.dirname, "..", "eval", "compare.ts"), "--baseline", b, "--candidate", c, "--dev-only", "--final"], { encoding: "utf8" });
+    assert.equal(cli.status, 1);
+    assert.match(cli.stderr, /--final needs the held-out guard and cannot be combined with --dev-only/);
+  });
+
+  it("a verdict is refused when one side loses far more runs to timeouts or caps than the other", () => {
+    const tasks3 = { x1: rate(0, 5), x2: rate(0, 5), x3: rate(0, 5) };
+    const b = base("t6b11", tasks3);
+    const c = base("t6c11", { x1: rate(5, 5), x2: rate(5, 5), x3: rate(0, 5) });
+    const fair = compareRuns([b], c, opts({ devOnly: true }));
+    assert.deepEqual([fair.decision, fair.exclusion.ok], ["KEEP", true]);
+    const lopsided = compareRuns([b], base("t6c11x", { x1: rate(5, 5), x2: rate(5, 5), x3: rate(0, 5) }, { capped: { x3: 6 } }), opts({ devOnly: true }));
+    assert.equal(lopsided.exclusion.ok, false);
+    assert.ok(lopsided.exclusion.cand > 0.2 && lopsided.exclusion.base === 0);
+    assert.equal(lopsided.decision, "INCONCLUSIVE");
+    assert.match(lopsided.reasons.join("|"), /runs excluded as incomplete: 0% of baseline runs against 29% of candidate runs; the gap is over 10 points/);
+    assert.match(renderComparison(lopsided), /Runs excluded as incomplete: 0% baseline, 29% candidate/);
+  });
+
+  it("arms that differ in a server setting other than the context settings are not like for like; context settings may differ", () => {
+    const s = { MAX_TURNS: "30", DEEPSEEK_MODEL: "deepseek-flash" };
+    const b = base("t6b12", { x1: rate(0, 5), x2: rate(0, 5) }, { settings: s });
+    const same = compareRuns([b], base("t6c12a", { x1: rate(5, 5), x2: rate(5, 5) }, { settings: { ...s, CONTEXT_MODE: "extended", JOB_INPUT_TOKEN_CAP: "9" } }), opts({ devOnly: true }));
+    assert.deepEqual([same.settings_problem, same.decision], [null, "KEEP"]);
+    const diff = compareRuns([b], base("t6c12b", { x1: rate(5, 5), x2: rate(5, 5) }, { settings: { ...s, MAX_TURNS: "60" } }), opts({ devOnly: true }));
+    assert.match(diff.settings_problem ?? "", /differ in MAX_TURNS, which are not context settings/);
+    assert.equal(diff.decision, "INCONCLUSIVE");
+  });
+
+  it("reports the cost ratio on the compared rows and warns above 1.5", () => {
+    const b = base("t6b13", { x1: rate(0, 5), x2: rate(0, 5) }, { cost: 0.1 });
+    const c = base("t6c13", { x1: rate(5, 5), x2: rate(5, 5) }, { cost: 0.2 });
+    const r = compareRuns([b], c, opts({ devOnly: true }));
+    assert.equal(r.cost_ratio, 2);
+    assert.match(r.reasons.join("|"), /cost rule: mean cost per run is x2 of the baseline, over 1.5/);
+    assert.equal(compareRuns([b], base("t6c13b", { x1: rate(5, 5), x2: rate(5, 5) }, { cost: 0.12 }), opts({ devOnly: true })).cost_ratio, 1.2);
   });
 
   it("with a tier filter only that tier is compared", () => {

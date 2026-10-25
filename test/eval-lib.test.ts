@@ -70,6 +70,20 @@ describe("proxy", () => {
     await up.close();
   });
 
+  it("a timed-out upstream call is counted and charged an estimate against the cap, because it may still be billed", async () => {
+    const hang = http.createServer(() => { /* never answers */ });
+    await new Promise<void>((r) => hang.listen(0, "127.0.0.1", () => r()));
+    open.push(() => new Promise<void>((r) => { hang.closeAllConnections(); hang.close(() => r()); }));
+    const proxy = await startProxy({ upstream: `http://127.0.0.1:${(hang.address() as AddressInfo).port}`, apiKey: "sk-REAL-KEY-123456", pricing: PRICING, upstreamTimeoutMs: 150, maxCost: 0.005 });
+    const s = proxy.session();
+    const call = () => fetch(`${proxy.url}/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${s.bearer}` }, body: "x".repeat(4000) });
+    const first = await call();
+    assert.equal(first.status, 502);
+    assert.deepEqual([s.stats.upstream_failures, s.stats.cost, s.stats.prompt], [1, costOf(PRICING, 1000, 0, 0), 0]);
+    assert.equal((await call()).status, 402, "the estimate counts toward --max-cost, so the next request is refused");
+    await proxy.close();
+  });
+
   it("rejects unknown bearers without contacting upstream", async () => {
     const up = await stubUpstream();
     const proxy = await startProxy({ upstream: up.url, apiKey: "sk-REAL-KEY-123456" });

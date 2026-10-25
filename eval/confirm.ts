@@ -40,6 +40,8 @@ export interface ConfirmOpts {
   gitBin: string;
   pricing?: Pricing | undefined;
   taskTimeoutS?: number;
+  /** how long the proxy waits for one upstream reply, in seconds (default 330) */
+  upstreamTimeoutS?: number;
   now?: () => Date;
   log: (line: string) => void;
 }
@@ -112,6 +114,7 @@ export async function runConfirm(o: ConfirmOpts): Promise<ConfirmResult> {
   const cm = readJson<{ server_hash?: string; lineage?: string | null }>(path.join(candDir, "manifest.json"));
   const bm = readJson<{ server_hash?: string }>(path.join(baseDir, "manifest.json"));
   if (!cm?.server_hash || !bm?.server_hash) throw new Error("refused: both runs need a manifest with a server_hash");
+  if (cm.server_hash === bm.server_hash) throw new Error("refused: the baseline and the candidate ran the same server code; a confirmation compares two code versions (runs that differ only in settings are screened with compare --dev-only, never confirmed)");
   if (!cm.lineage) throw new Error("refused: the candidate's manifest has no lineage, so its look budget cannot be keyed");
   for (const d of [candDir, baseDir]) if (!fs.existsSync(path.join(d, "server", "src"))) throw new Error(`refused: ${d} has no pinned server/ copy to run`);
 
@@ -132,7 +135,7 @@ export async function runConfirm(o: ConfirmOpts): Promise<ConfirmResult> {
   if (!o.yes) throw new Error("refused: this spends money and a look; re-run with --yes after reading the estimate above");
 
   const stamp = (o.now ?? (() => new Date()))().toISOString().replace(/[-:]/g, "").replace(/\..*/, "");
-  const base = { rootDir: o.rootDir, tasksRoots: [path.join(o.evalDir, "confirm")], runsDir: o.runsDir, k: o.k, splits: ["confirm" as const], parallel: 1, dryRun: false, yes: true, maxCost: o.maxCost / 2, taskTimeoutS: o.taskTimeoutS ?? 1200, resume: false, allowDirty: true, apiKey: o.apiKey, upstream: o.upstream, gitBin: o.gitBin, serverEnv: process.env, pricing: o.pricing, purpose: "comparison" as const, log: () => {} };
+  const base = { rootDir: o.rootDir, tasksRoots: [path.join(o.evalDir, "confirm")], runsDir: o.runsDir, k: o.k, splits: ["confirm" as const], parallel: 1, dryRun: false, yes: true, maxCost: o.maxCost / 2, taskTimeoutS: o.taskTimeoutS ?? 1200, ...(o.upstreamTimeoutS ? { upstreamTimeoutS: o.upstreamTimeoutS } : {}), resume: false, allowDirty: true, apiKey: o.apiKey, upstream: o.upstream, gitBin: o.gitBin, serverEnv: process.env, pricing: o.pricing, purpose: "comparison" as const, log: () => {} };
   const ids = { baseline: `confirm-${stamp}-baseline`, candidate: `confirm-${stamp}-candidate` };
   const [rb, rc] = await Promise.all([
     runEval({ ...base, runId: ids.baseline, arm: "baseline", serverSrc: path.join(baseDir, "server") }),
@@ -205,7 +208,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   try {
     const r = await runConfirm({
       rootDir: path.resolve(here, ".."), evalDir: here, runsDir: path.resolve(here, "..", "runs"), candidate, baseline, final: args.includes("--final"), k: Number(get("k") ?? 8),
-      maxCost: Number(get("max-cost") ?? 2.5), margin: Number(get("margin") ?? 0.1), yes: args.includes("--yes"), apiKey: process.env.DEEPSEEK_API_KEY ?? "",
+      maxCost: Number(get("max-cost") ?? 2.5), ...(get("upstream-timeout") ? { upstreamTimeoutS: Number(get("upstream-timeout")) } : {}), margin: Number(get("margin") ?? 0.1), yes: args.includes("--yes"), apiKey: process.env.DEEPSEEK_API_KEY ?? "",
       upstream: process.env.EVAL_UPSTREAM ?? "https://api.deepseek.com", gitBin: CFG.git, pricing, log: (l) => console.log(l),
     });
     console.log(renderConfirm(r));

@@ -328,7 +328,13 @@ function availableTools(caps: Caps): ToolSchema[] {
 export function packResult(out: unknown, limit = CFG.resultLimitChars): string {
   const s = JSON.stringify(out);
   if (s.length <= limit) return s;
-  return JSON.stringify({ error: `result too large (${s.length} chars); narrow the request or page it`, preview: s.slice(0, limit - 300) });
+  let preview = s.slice(0, limit - 300);
+  // extended mode: the preview ends at a line boundary (inside the escaped JSON text a line break is the two characters \n)
+  if (CFG.contextMode === "extended") {
+    const at = preview.lastIndexOf("\\n");
+    if (at > preview.length * 0.5) preview = preview.slice(0, at);
+  }
+  return JSON.stringify({ error: `result too large (${s.length} chars); narrow the request or page it`, preview });
 }
 
 export async function executeTool(name: string, args: Record<string, unknown> | null | undefined, caps: Caps): Promise<ToolOutput> {
@@ -512,7 +518,7 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
     }
     if (!calls.length) {
       logLine(`final (turn ${turns}): ${String(msg.content || "").slice(0, 200).replace(/\s+/g, " ")}`);
-      if (verify && repairs.length < CFG.maxRepairs && turns < CFG.maxTurns && !signal?.aborted) {
+      if (verify && repairs.length < CFG.maxRepairs && turns < CFG.maxTurns && !(CFG.jobInputTokenCap > 0 && usage.input >= CFG.jobInputTokenCap) && !signal?.aborted) {
         const problem = await verify(msg.content || "");
         if (problem) {
           repairs.push({ turn: turns, why: String(problem.why).replace(/\s+/g, " ").slice(0, 160) });

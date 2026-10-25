@@ -1,4 +1,4 @@
-// The CI command: unit tests, then the API surface check, then the changelog check. Stops at the first failure.
+// The CI command. Runs its stages in order and stops at the first failure.
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');

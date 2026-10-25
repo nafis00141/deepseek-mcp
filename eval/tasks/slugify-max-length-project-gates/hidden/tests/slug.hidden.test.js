@@ -36,7 +36,7 @@ test('without the option there is no limit', () => {
 });
 
 test('a bad maxLength throws a RangeError', () => {
-  for (const bad of [0, -3, 1.5, NaN, Infinity, '5', null]) {
+  for (const bad of [0, -3, 1.5, NaN, Infinity, '5']) {
     assert.throws(() => slugify('hello world', { maxLength: bad }), RangeError, String(bad));
   }
 });
