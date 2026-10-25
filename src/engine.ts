@@ -94,8 +94,10 @@ const newFileEol = (): string => (repoEol ??= detectRepoEol());
 
 /* --------------------------------------------------------------- capabilities */
 
-export function capsFor(roleName: RoleName, role: RoleSpec, task: Task | null | undefined): Caps {
+export function capsFor(roleName: RoleName, role: RoleSpec, task: Task | null | undefined, target?: string): Caps {
   if (role.caps === "specs") return { write: ["specs/**"], denySpecs: false, canRunTests: false, baseRef: null };
+  // Research may write one file and nothing else; with no target it fails closed (no write access at all).
+  if (role.caps === "research") return { write: target && role.artifact ? [`${toPosix(target).replace(/\/+$/, "")}/${role.artifact}`] : [], denySpecs: false, canRunTests: false, baseRef: null };
   if (role.caps === "readonly") return { write: [], denySpecs: true, canRunTests: false, baseRef: CFG.baseRef };
 
   return {

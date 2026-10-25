@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CFG } from "./config.ts";
-import { changedFiles, commitsBetween, diffFilesAgainst, diffFilesBetween, diffSize, parseSummary, rel, runCmd, snapshot, toPosix } from "./repo.ts";
-import { globsOverlap, isDeniedWrite, matchAny, normRel, readTask, scopeFor, scopeProblems } from "./taskfile.ts";
+import { changedFiles, commitsBetween, diffFilesAgainst, diffFilesBetween, diffSize, parseSummary, rel, resolveInRepo, runCmd, snapshot, toPosix } from "./repo.ts";
+import { globsOverlap, isDeniedRead, isDeniedWrite, matchAny, normRel, readTask, scopeFor, scopeProblems } from "./taskfile.ts";
 import type { Task } from "./taskfile.ts";
 import type { VerifyProblem } from "./engine.ts";
 import type { ExecResult, Job, JobResult } from "./types.ts";
@@ -73,7 +73,84 @@ function testCommandProblem(cmd: string): string | null {
   }
 }
 
-/** spec / plan / tasks: docs only, judged by artifact shape. */
+/* ------------------------------------------------------------------ citations */
+
+export interface Citations {
+  /** every path:line citation found, counting repeats */
+  total: number;
+  /** distinct citations that resolve to a real line */
+  distinct: number;
+  resolved: string[];
+  unresolved: { cite: string; why: string }[];
+  /** citations followed by a backticked quote that is not on the cited line(s) */
+  quote_mismatches: string[];
+  /** the document says, with a `NOT FOUND:` line, that the answer is not in the repository */
+  not_found: boolean;
+}
+
+// path:line or path:start-end. Not preceded by a path character, so a URL's tail or a longer path is not matched mid-way.
+const CITE_RE = /(?<![\w/.:@\\-])([A-Za-z0-9_@.\-/\\]+\.[A-Za-z][A-Za-z0-9]{0,7}):(\d+)(?:-(\d+))?/g;
+// a quote straight after the citation: optional closing backtick, then an optional separator, then `quote`
+const QUOTE_AFTER = /^`?\s*(?:[-–—:]\s*)?`([^`\n]{1,300})`/;
+const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+
+/**
+ * Check every `path:line` citation in a research document: the file exists in the repo, may be read, and the line (or range)
+ * is inside it; a backticked quote right after a citation must occur on the cited line(s). Repeating a citation does not add
+ * to the distinct count. Nothing here judges whether a citation *supports* a claim; that gap is named in the spec.
+ */
+export function citationProblems(text: string): Citations {
+  const resolvedLines = new Map<string, string> (); // cite -> the cited text, squashed; resolved once per distinct citation
+  const failed = new Set<string>();
+  const unresolved: { cite: string; why: string }[] = [];
+  const mismatches = new Set<string>();
+  let total = 0;
+  for (const m of text.matchAll(CITE_RE)) {
+    total++;
+    const file = toPosix(m[1] as string).replace(/^\.\//, "");
+    const start = Number(m[2]);
+    const end = m[3] ? Number(m[3]) : start;
+    const cite = `${file}:${start}${m[3] ? `-${end}` : ""}`;
+    if (failed.has(cite)) continue;
+    if (!resolvedLines.has(cite)) {
+      const problem = ((): string | { cited: string } => {
+        try {
+          const abs = resolveInRepo(file);
+          if (isDeniedRead(rel(abs))) return "not readable";
+          if (!fs.statSync(abs).isFile()) return "not a file";
+          const lines = fs.readFileSync(abs, "utf8").split(/\r?\n/);
+          if (lines[lines.length - 1] === "") lines.pop();
+          if (start < 1 || end < start || end > lines.length) return `line outside the file (${lines.length} lines)`;
+          return { cited: squash(lines.slice(start - 1, end).join(" ")) };
+        } catch (e) {
+          return /ENOENT/.test((e as Error).message) ? "no such file" : (e as Error).message.slice(0, 60);
+        }
+      })();
+      if (typeof problem === "string") {
+        failed.add(cite);
+        unresolved.push({ cite, why: problem });
+        continue;
+      }
+      resolvedLines.set(cite, problem.cited);
+    }
+    // Every occurrence is checked, not only the first: a citation first used bare and later given a wrong quote must still fail.
+    const quote = QUOTE_AFTER.exec(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 400))?.[1];
+    if (quote && !(resolvedLines.get(cite) as string).includes(squash(quote))) mismatches.add(cite);
+  }
+  return { total, distinct: resolvedLines.size, resolved: [...resolvedLines.keys()], unresolved, quote_mismatches: [...mismatches], not_found: /^\s*(?:[-*>]\s*)?(?:\*\*)?NOT FOUND:/im.test(text) };
+}
+
+/** What a research document must show: at least 3 distinct resolving citations (1 when it honestly reports NOT FOUND), none unresolved, no wrong quote. */
+function citationReasons(c: Citations): string[] {
+  const out: string[] = [];
+  const need = c.not_found ? 1 : 3;
+  if (c.unresolved.length) out.push(`unresolved citation(s): ${c.unresolved.slice(0, 5).map((u) => `${u.cite} (${u.why})`).join(", ")}${c.unresolved.length > 5 ? ", ..." : ""}`);
+  if (c.quote_mismatches.length) out.push(`quote not on the cited line: ${c.quote_mismatches.slice(0, 5).join(", ")}`);
+  if (c.distinct < need) out.push(`only ${c.distinct} distinct resolving citation(s); need at least ${need}${c.not_found ? " (the document says NOT FOUND)" : ""}`);
+  return out;
+}
+
+/** spec / plan / tasks / research: docs only, judged by artifact shape. */
 function docGate(job: Job, res: ExecResult | null): JobResult {
   const reasons: string[] = [];
   if (!res) reasons.push("no result from the model");
@@ -96,6 +173,7 @@ function docGate(job: Job, res: ExecResult | null): JobResult {
 
   let artifact: string | null = null;
   let preview = "";
+  let citations: Citations | null = null;
   const missing: string[] = [];
 
   if (job.mode === "doc" && job.artifact === "tasks/") {
@@ -137,13 +215,18 @@ function docGate(job: Job, res: ExecResult | null): JobResult {
       const txt = fs.readFileSync(abs, "utf8");
       for (const h of job.headings || []) if (!txt.includes(h)) missing.push(h);
       if (missing.length) reasons.push(`missing sections: ${missing.join(", ")}`);
-      if (txt.length < 200) reasons.push(`artifact suspiciously short (${txt.length} bytes)`);
+      const minChars = job.role === "research" ? 400 : 200;
+      if (txt.length < minChars) reasons.push(`artifact suspiciously short (${txt.length} bytes; need ${minChars})`);
+      if (job.role === "research") {
+        citations = citationProblems(txt);
+        reasons.push(...citationReasons(citations));
+      }
       artifact = p;
       preview = clip(txt);
     }
   }
 
-  return { status: reasons.length ? "failed" : "done", reasons, infra: Boolean(res?.isError), artifact, missing_sections: missing, preview, report: report(res), turns: res?.turns ?? null };
+  return { status: reasons.length ? "failed" : "done", reasons, infra: Boolean(res?.isError), artifact, missing_sections: missing, preview, report: report(res), turns: res?.turns ?? null, ...(citations ? { citations } : {}) };
 }
 
 /** impl / fix / test: code, judged by the repo itself. */

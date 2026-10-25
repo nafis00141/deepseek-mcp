@@ -156,6 +156,27 @@ Question: ${instruction || "Summarize the current state of " + target}
 - read_file / list_dir / grep only. Cite file:line for every claim.
 - Answer in at most 40 lines, then the summary block.`;
 
+const research = ({ target, instruction }: PromptCtx): string => `${COMMON}
+
+# Role: RESEARCHER
+Question: ${instruction || "Summarize what " + target + " is about"}
+You have read_file, list_dir and grep to read the repository, and you may write exactly one file: ${target}/research.md. You cannot write anywhere else.
+
+# Produce
+Create ${target}/research.md with exactly these sections:
+## Question
+## Findings
+## Evidence
+## Open questions
+
+# Rules
+- Cite as path:line or path:start-end, repo-relative (src/retry.js:12 or src/retry.js:10-14). Every claim in Findings carries a citation.
+- Evidence lists each citation with a short quote of what is on that line, in backticks, straight after it: src/retry.js:12 \`const MAX = 5\`. The harness checks that the quote is on the cited line.
+- Use at least 3 distinct citations. Repeating one citation does not count twice.
+- If the answer is not in the repository, say so: start a Findings line with NOT FOUND: followed by what you looked for, cite at least one place you looked, and do not guess.
+- Do not copy secrets. .env files are unreadable.
+- Keep it under about 80 lines.`;
+
 export const ROLES: Record<RoleName, RoleSpec> = {
   spec: { caps: "specs", mode: "doc", artifact: "spec.md", headings: ["## Goal", "## Acceptance criteria"], needsInstruction: true, wait: 120, title: "Write specs/<feature>/spec.md from a brief" },
   plan: { caps: "specs", mode: "doc", artifact: "plan.md", headings: ["## Approach"], wait: 120, title: "Write plan.md from an existing spec" },
@@ -165,12 +186,13 @@ export const ROLES: Record<RoleName, RoleSpec> = {
   test: { caps: "code", mode: "code", branch: true, needsTask: true, wait: 0, title: "Add tests for one task without touching production code" },
   review: { caps: "readonly", mode: "review", wait: 150, title: "Read-only spec-vs-diff review, returns verdict JSON" },
   ask: { caps: "readonly", mode: "text", needsInstruction: true, wait: 90, title: "Read-only question about the repo, answered with citations" },
+  research: { caps: "research", mode: "doc", artifact: "research.md", headings: ["## Question", "## Findings", "## Evidence", "## Open questions"], needsInstruction: true, wait: 150, title: "Read-only research written to specs/<feature>/research.md, with every citation checked" },
 };
 
 export const ROLE_NAMES = Object.keys(ROLES) as RoleName[];
 
 export function buildPrompt(roleName: RoleName, ctx: PromptCtx): string {
-  const builders: Record<RoleName, (c: PromptCtx) => string> = { spec, plan, tasks, impl, fix: impl, test, review, ask };
+  const builders: Record<RoleName, (c: PromptCtx) => string> = { spec, plan, tasks, impl, fix: impl, test, review, ask, research };
   const body = builders[roleName](ctx);
   if (!ctx.pack) return body;
   return `${body}

@@ -1,11 +1,12 @@
 import type { Task } from "./taskfile.ts";
 
-export type RoleName = "spec" | "plan" | "tasks" | "impl" | "fix" | "test" | "review" | "ask";
+export type RoleName = "spec" | "plan" | "tasks" | "impl" | "fix" | "test" | "review" | "ask" | "research";
 export type Mode = "doc" | "code" | "review" | "text";
 
 /** What the harness knows about one role: how it is run and how it is judged. */
 export interface RoleSpec {
-  caps: "specs" | "code" | "readonly";
+  /** `research`: read-only, plus one writable file, <target>/research.md. */
+  caps: "specs" | "code" | "readonly" | "research";
   mode: Mode;
   artifact?: string;
   headings?: string[];

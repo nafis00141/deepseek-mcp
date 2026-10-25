@@ -384,7 +384,7 @@ server.tool(
       state: "running",
     });
 
-    const promise = executeJob(jobId, { prompt, caps: capsFor(roleKey, role, task), mode: role.mode, task })
+    const promise = executeJob(jobId, { prompt, caps: capsFor(roleKey, role, task, targetRel), mode: role.mode, task })
       .catch((e) => {
         log(`job ${jobId} crashed: ${(e as Error).message}`);
         const j = readJob(jobId);
