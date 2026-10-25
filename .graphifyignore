@@ -1,0 +1,19 @@
+# What graphify indexes. Derived output and dependencies:
+node_modules/
+graphify-out/
+runs/
+specs/.jobs/
+.git/
+
+# PRIVATE eval task sets (held-out, confirmation, reserve): never index them. A graph answers questions, and a question
+# about a private task must not be answered from here. See eval/loop.md (privacy rule).
+eval/heldout/
+eval/confirm/
+eval/reserve/
+
+# Task fixtures are test material, not the code base: their repos, reference solutions, decoys and hidden tests would drown real hits.
+eval/tasks/*/repo/
+eval/tasks/*/reference/
+eval/tasks/*/decoy/
+eval/tasks/*/decoy2/
+eval/tasks/*/hidden/

@@ -9,3 +9,4 @@ eval/confirm/
 eval/reserve/
 eval/.env
 eval/audit-allow.json
+graphify-out/
