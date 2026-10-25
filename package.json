@@ -11,7 +11,10 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck",
     "test": "node --test \"test/*.test.ts\"",
-    "smoke": "node scripts/smoke.ts"
+    "smoke": "node scripts/smoke.ts",
+    "eval": "node eval/run.ts",
+    "eval:dry": "node eval/run.ts --dry-run",
+    "eval:score": "node eval/score.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

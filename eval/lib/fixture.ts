@@ -1,0 +1,87 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
+import type { LoadedTask, Split, TaskDef } from "./types.ts";
+
+export const sleepSync = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** Read every <dir>/<id>/task.json under the given roots. Held-out tasks are only read when `splits` includes "heldout". */
+export function loadTasks(roots: string[], splits: Split[]): LoadedTask[] {
+  const out: LoadedTask[] = [];
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+      const file = path.join(root, e.name, "task.json");
+      if (!e.isDirectory() || !fs.existsSync(file)) continue;
+      const def = JSON.parse(fs.readFileSync(file, "utf8")) as TaskDef;
+      if (def.id !== e.name) throw new Error(`${file}: id "${def.id}" must equal the folder name "${e.name}"`);
+      if (!splits.includes(def.split)) continue;
+      out.push({ ...def, dir: path.join(root, e.name) });
+    }
+  }
+  return out.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export interface Fixture {
+  tmp: string;
+  repo: string;
+  git: (...args: string[]) => string;
+  remove: () => void;
+}
+
+const toCrlf = (s: string): string => s.replace(/\r?\n/g, "\r\n");
+
+/**
+ * A throwaway git repo built from <task.dir>/repo. Conventions match the server's tests: main branch via symbolic-ref,
+ * local identity, no signing, autocrlf off (the user's global setting must not rewrite fixtures). The temp path is
+ * resolved with realpath.native because os.tmpdir() can be an 8.3 short name on Windows.
+ */
+export function makeRepo(task: Pick<LoadedTask, "dir" | "crlf_files">, git: string): Fixture {
+  const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "dsev-")));
+  const repo = path.join(tmp, "repo");
+  fs.mkdirSync(repo);
+  const src = path.join(task.dir, "repo");
+  if (fs.existsSync(src)) fs.cpSync(src, repo, { recursive: true });
+  for (const f of task.crlf_files ?? []) {
+    const p = path.join(repo, f);
+    fs.writeFileSync(p, toCrlf(fs.readFileSync(p, "utf8")));
+  }
+  const run = (...args: string[]): string => {
+    const r = spawnSync(git, args, { cwd: repo, encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${`${r.stdout}${r.stderr}`.trim().slice(0, 300)}`);
+    return String(r.stdout).trim();
+  };
+  run("init", "-q");
+  run("symbolic-ref", "HEAD", "refs/heads/main");
+  for (const [k, v] of [["user.name", "eval"], ["user.email", "eval@example.invalid"], ["commit.gpgsign", "false"], ["core.autocrlf", "false"]] as const) run("config", k, v);
+  const ign = path.join(repo, ".gitignore");
+  const have = fs.existsSync(ign) ? fs.readFileSync(ign, "utf8") : "";
+  const nl = have.includes("\r\n") ? "\r\n" : "\n";
+  fs.writeFileSync(ign, `${have}${have && !have.endsWith("\n") ? nl : ""}specs/.jobs/${nl}specs/review/${nl}`);
+  run("add", "-A");
+  run("commit", "-qm", "fixture");
+  return { tmp, repo, git: run, remove: () => removeDir(tmp) };
+}
+
+/** Run an optional <task.dir>/setup.ts: default export (ctx) => void, for extra branches or committed artifacts. */
+export async function runSetup(task: Pick<LoadedTask, "dir">, fx: Fixture): Promise<void> {
+  const file = path.join(task.dir, "setup.ts");
+  if (!fs.existsSync(file)) return;
+  const mod = (await import(pathToFileURL(file).href)) as { default?: (ctx: { repo: string; git: Fixture["git"] }) => void | Promise<void> };
+  if (typeof mod.default !== "function") throw new Error(`${file}: default export must be a function`);
+  await mod.default({ repo: fx.repo, git: fx.git });
+}
+
+/** rm -rf with retries: antivirus and the indexer hold files briefly on Windows (EBUSY/EPERM). */
+export function removeDir(dir: string): void {
+  for (let i = 0; i < 6; i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch {
+      sleepSync(200 * (i + 1));
+    }
+  }
+}

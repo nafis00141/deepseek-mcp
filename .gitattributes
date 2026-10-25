@@ -1,0 +1,2 @@
+# Eval fixtures carry deliberate line endings (CRLF reference files, an LF decoy); never normalise them.
+eval/** -text

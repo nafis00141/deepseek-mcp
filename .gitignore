@@ -3,3 +3,6 @@ node_modules/
 .npm-cache/
 specs/.jobs/
 specs/review/
+runs/
+eval/heldout/
+eval/.env
