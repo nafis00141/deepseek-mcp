@@ -144,6 +144,8 @@ export interface Job {
   /** A free-form job: its scope (`allowedPaths`) and test command live here, and the gate trusts these, not a file on the branch. */
   synthetic?: boolean;
   testCommand?: string | null;
+  /** fix/test only: the existing branch this job's own branch was cut from, when this server had no job for it */
+  sourceBranch?: string | null;
   discardedAt?: string;
 }
 

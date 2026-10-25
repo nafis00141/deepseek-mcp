@@ -254,7 +254,7 @@ server.tool(
     instruction: z.string().optional().describe("Brief for spec, question for ask and research, the whole task for do, extra steer for others"),
     feedback_path: z.string().optional().describe("Review markdown to address; required for role=fix"),
     wait: z.boolean().optional().describe("false = return a job_id immediately; true = wait as long as allowed"),
-    branch: z.string().optional().describe("review only: branch to review (default: newest code branch for the feature)"),
+    branch: z.string().optional().describe("review: branch to review (default: newest code branch for the feature). fix/test: an existing impl/, fix/, test/ or do/ branch made by this server to start from (a new branch is cut from its tip; it is never committed onto)"),
     paths: z.array(z.string()).optional().describe("do only (required): globs the job may change, each with a literal folder before its wildcard, e.g. src/lib/**"),
     test_command: z.string().optional().describe("do only (required): npm test, npm run <script>, or node --test <paths>"),
   },
@@ -324,9 +324,14 @@ server.tool(
       return blocked(`identical to failed job ${prior.jobId}; read its reasons and change the instruction, task or feedback instead of retrying`, { prior_reasons: prior.result?.reasons ?? [] });
     }
     if (roleName === "fix") {
-      const used = history.filter((j) => j.role === "fix" && j.targetRel === targetRel && ["done", "failed", "noop"].includes(j.state) && !j.result?.infra).length;
+      // Rounds are the larger of the count by task file and the count by the branch the fixes started from, and never reset:
+      // renaming a branch does not hide the rounds already spent on the task, and changing the task file does not hide the branch's.
+      const spent = history.filter((j) => j.role === "fix" && ["done", "failed", "noop"].includes(j.state) && !j.result?.infra);
+      const byTask = spent.filter((j) => j.targetRel === targetRel).length;
+      const byBranch = reviewBranchParam ? spent.filter((j) => j.sourceBranch === reviewBranchParam || j.branch === reviewBranchParam).length : 0;
+      const used = Math.max(byTask, byBranch);
       if (used >= CFG.maxFixRounds) {
-        return json({ status: "escalate", reason: `${used} fix round(s) already used on ${targetRel} (max ${CFG.maxFixRounds}); hand this back to the human` });
+        return json({ status: "escalate", reason: `${used} fix round(s) already used on ${byBranch > byTask ? `branch ${reviewBranchParam}` : targetRel} (max ${CFG.maxFixRounds}); hand this back to the human` });
       }
     }
 
@@ -341,10 +346,12 @@ server.tool(
     let switched = false;
     let createdBranch = false;
     let startedFrom: string | null = null;
+    let sourceBranch: string | null = null;
     if (role.branch) {
-      const plan = planBranch({ roleName, task, targetRel, history, baseRef: CFG.baseRef ?? "HEAD" });
+      const plan = planBranch({ roleName, task, targetRel, history, baseRef: CFG.baseRef ?? "HEAD", branchParam: roleName === "fix" || roleName === "test" ? reviewBranchParam : undefined, currentBranch: baseBranch });
       if (plan.error !== undefined) return blocked(plan.error);
       startedFrom = plan.from;
+      sourceBranch = plan.source ?? null;
       if (plan.mode === "continue" && plan.branch) {
         branch = plan.branch;
         const co = git(["checkout", branch]);
@@ -391,6 +398,7 @@ server.tool(
       task: task?.id ?? null,
       allowedPaths: task?.allowedPaths ?? [],
       ...(role.synthetic ? { synthetic: true, testCommand: task?.testCommand ?? null } : {}),
+      ...(sourceBranch ? { sourceBranch } : {}),
       startedSha,
       startedChanges,
       logPath: path.join(CFG.jobs, `${jobId}.log`),

@@ -21,5 +21,6 @@ export interface CallKeyParts {
 export function callKey(p: CallKeyParts): string {
   const parts = [p.role, p.target, p.instruction || "", p.feedback || ""];
   if (p.synthetic) parts.push([...(p.paths ?? [])].map(normRel).sort().join("|"), String(p.testCommand ?? "").trim(), p.branch ?? "");
+  else if (p.branch && (p.role === "fix" || p.role === "test")) parts.push("branch", p.branch);
   return crypto.createHash("sha1").update(parts.join("\0")).digest("hex");
 }

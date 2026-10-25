@@ -28,6 +28,9 @@ const call = (name: string, args: unknown): Reply => ({ message: { role: "assist
 
 let stubServer: http.Server;
 let client: McpClient;
+/** the branch the first successful do job made: a real, server-made branch for the fix tests to start from */
+let doBranch = "";
+let fixBranch = "";
 
 const git = (...args: string[]): string => String(spawnSync(CFG.git, args, { cwd: repo, encoding: "utf8" }).stdout).trim();
 const write = (rel: string, text: string): void => {
@@ -120,6 +123,7 @@ describe("handoff role=do over the real server", () => {
     const r = await handoff({ ...DO, instruction: "make parse() split on tabs as well as commas" });
     assert.deepEqual([r.status, r.reasons], ["done", []]);
     const branch = String(r.branch);
+    doBranch = branch;
     assert.match(branch, /^do\/[0-9a-f]{8}-[0-9a-z]+$/);
     assert.ok(branch.includes(String(r.job_id)), "the branch name carries the job id");
     assert.equal(r.started_from, "main");
@@ -167,7 +171,84 @@ describe("handoff role=do over the real server", () => {
     assert.equal(git("rev-parse", "--abbrev-ref", "HEAD"), "main");
   });
 
+  it("fix can start from that branch although no fix job exists, and never commits onto it", async () => {
+    assert.ok(doBranch, "the earlier test made a do branch");
+    write("specs/f/tasks/01-x.md", "---\nid: 01\nallowed_paths: [src/**, tests/**]\ntest_command: node --test tests/lib.test.js\ndepends_on: []\n---\n# Task 01\n## Acceptance criteria\n- AC-1: parse splits on commas\n");
+    write("specs/review/r.md", "# review\n- F1 major: parse() should trim whitespace around items\n");
+    const tipBefore = git("rev-parse", doBranch);
+    script.push(call("write_file", { path: "src/lib/parse.js", content: "module.exports = { parse: (s) => s.split(/[,\\t]/).map((x) => x.trim()).filter(Boolean) };\n" }), say(`Addressed F1.\n${DONE}`));
+    const r = await handoff({ role: "fix", target: "specs/f/tasks/01-x.md", feedback_path: "specs/review/r.md", branch: doBranch, instruction: "address F1" });
+    assert.equal(r.status, "done", JSON.stringify(r.reasons));
+    assert.match(String(r.branch), /^fix\/01-[0-9a-z]+$/);
+    assert.equal(r.started_from, doBranch);
+    assert.equal(git("rev-parse", doBranch), tipBefore, "the source branch is untouched");
+    assert.equal(git("rev-list", "--count", `${doBranch}..${String(r.branch)}`), "1");
+    assert.equal(git("log", "-1", "--format=%s", String(r.branch)), "task-01: fix");
+    assert.equal(git("rev-parse", "--abbrev-ref", "HEAD"), "main");
+    fixBranch = String(r.branch);
+  });
+
+  it("a second fix on the same task continues the fix branch the server made; a third is escalated", async () => {
+    script.push(call("write_file", { path: "src/lib/parse.js", content: "module.exports = { parse: (s) => s.split(/[,\\t]/).map((x) => x.trim()).filter((x) => x !== '') };\n" }), say(`Second pass.\n${DONE}`));
+    const second = await handoff({ role: "fix", target: "specs/f/tasks/01-x.md", feedback_path: "specs/review/r.md", branch: doBranch, instruction: "tidy" });
+    assert.equal(second.status, "done", JSON.stringify(second.reasons));
+    assert.equal(second.branch, fixBranch, "continued onto the server's own fix branch, not the source");
+    assert.equal(git("rev-list", "--count", `${doBranch}..${fixBranch}`), "2");
+    const third = await client.call("handoff", { role: "fix", target: "specs/f/tasks/01-x.md", feedback_path: "specs/review/r.md", branch: doBranch, instruction: "once more" });
+    assert.equal(third.status, "escalate");
+    assert.match(String(third.reason), /2 fix round\(s\) already used/);
+  });
+
+  it("renaming the source branch does not reset the rounds: the same task is still escalated", async () => {
+    git("branch", "do/renamed-copy", doBranch);
+    const r = await client.call("handoff", { role: "fix", target: "specs/f/tasks/01-x.md", feedback_path: "specs/review/r.md", branch: "do/renamed-copy", instruction: "try the copy" });
+    assert.equal(r.status, "escalate");
+  });
+
+  it("refuses the base branch, another prefix, a missing branch, a branch with no server-made commit and the branch you are on", async () => {
+    write("specs/f/tasks/02-y.md", "---\nid: 02\nallowed_paths: [src/**]\ntest_command: node --test tests/lib.test.js\ndepends_on: []\n---\n# Task 02\n## Acceptance criteria\n- AC-1: x\n");
+    git("checkout", "-q", "-b", "impl/handmade", "main");
+    write("src/lib/hand.js", "module.exports = 1;\n");
+    git("add", "src/lib/hand.js"); // not -A: the task file written above must stay untracked on main
+    git("commit", "-qm", "wip");
+    git("checkout", "-q", "main");
+    const before = modelCalls;
+    const ask = (branch: string) => client.call("handoff", { role: "fix", target: "specs/f/tasks/02-y.md", feedback_path: "specs/review/r.md", branch });
+    const cases: [string, RegExp][] = [
+      ["main", /is the base branch/],
+      ["feature/x", /must start with impl\/, fix\/, test\/, do\//],
+      ["do/none", /branch not found: do\/none/],
+      ["impl/handmade", /no commit made by this server/],
+    ];
+    for (const [branch, re] of cases) {
+      const r = await ask(branch);
+      assert.equal(r.status, "blocked", branch);
+      assert.match(String(r.reason), re, branch);
+    }
+    // a server-made branch this server has no job for (history would otherwise continue its own work), checked out by the human
+    git("checkout", "-q", "-b", "impl/other", "main");
+    write("src/lib/other.js", "module.exports = 2;\n");
+    git("add", "src/lib/other.js");
+    git("commit", "-qm", "task-09: impl");
+    const current = await ask("impl/other");
+    git("checkout", "-q", "main");
+    assert.equal(current.status, "blocked");
+    assert.match(String(current.reason), /branch you are on/);
+    assert.equal(modelCalls, before, "no refusal reached the model");
+  });
+
+  it("test follows the same rule: for a task the server already worked on it continues that task's branch, as it always has", async () => {
+    script.push(call("write_file", { path: "tests/lib.extra.test.js", content: "const test = require('node:test');\ntest('extra', () => {});\n" }), say(`Added a test.\n${DONE}`));
+    // task 01 allows tests/**, which the test role needs (task 02 only allows src/**)
+    const r = await handoff({ role: "test", target: "specs/f/tasks/01-x.md", branch: doBranch, instruction: "add an extra test" });
+    assert.equal(r.status, "done", JSON.stringify(r.reasons ?? r.reason));
+    assert.equal(r.branch, fixBranch, "one branch per task: the test job continues the fix branch");
+    assert.equal(r.started_from, fixBranch);
+    assert.deepEqual(r.files, ["tests/lib.extra.test.js"]);
+  });
+
   it("the key ignores the order of paths: the same set in another order is still the same call", async () => {
+    script.length = 0;
     script.push(say("SPEC_GAP: no"));
     const a = await handoff({ ...DO, instruction: "order test", paths: ["src/lib/**", "tests/**"].reverse() });
     assert.equal(a.status, "failed");

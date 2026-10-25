@@ -2,7 +2,7 @@ import "./helpers.ts";
 import { after, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { cleanup, gitOut, mkJob, mkTask, put, resetRepo, sh } from "./helpers.ts";
-import { branchExists, discardBranch, latestBranchFor, planBranch, restoreBranch } from "../src/branching.ts";
+import { branchExists, discardBranch, latestBranchFor, planBranch, restoreBranch, validateExternalBranch } from "../src/branching.ts";
 import type { BranchPlan } from "../src/branching.ts";
 import type { Job } from "../src/types.ts";
 
@@ -59,6 +59,77 @@ describe("planBranch", () => {
     const history = [hist("01", "dep1"), hist("02", "dep3", "fix")];
     assert.equal(latestBranchFor(history, "specs/f"), "dep3");
     assert.equal(latestBranchFor([hist("01", "dep1")], "specs/other"), null);
+  });
+});
+
+describe("validateExternalBranch and planBranch from a named branch", () => {
+  /** A branch off main with the given commit subjects. */
+  const mkBranch = (name: string, subjects: string[]): void => {
+    sh("git", ["checkout", "-q", "-b", name, "main"]);
+    subjects.forEach((s, i) => {
+      put(`f-${name.replace(/\W/g, "_")}-${i}.txt`, `${s}\n`);
+      sh("git", ["add", "-A"]);
+      sh("git", ["commit", "-qm", s]);
+    });
+    sh("git", ["checkout", "-q", "main"]);
+  };
+  const v = (branch: string, current = "main") => validateExternalBranch({ branch, baseRef: "main", currentBranch: current });
+
+  it("accepts a branch this tool family made: right prefix, exists, not base or current, a server-made commit among its commits", () => {
+    mkBranch("do/abc12345-x", ["wip by hand", "task-do: do"]);
+    mkBranch("impl/01-a", ["task-01: impl"]);
+    mkBranch("fix/01-b", ["task-01: fix"]);
+    mkBranch("test/01-c", ["task-01: test"]);
+    for (const b of ["do/abc12345-x", "impl/01-a", "fix/01-b", "test/01-c"]) assert.equal(v(b), null, b);
+  });
+
+  it("refuses the base branch, the human's own branch, another prefix, a missing branch, an empty branch and one with no server-made commit", () => {
+    mkBranch("impl/mine", ["wip", "more wip"]);
+    mkBranch("feature/thing", ["task-01: impl"]);
+    mkBranch("impl/empty", []);
+    mkBranch("impl/ok", ["task-01: impl"]);
+    assert.match(v("main") ?? "", /is the base branch/);
+    assert.match(v("feature/thing") ?? "", /must start with impl\/, fix\/, test\/, do\//);
+    assert.match(v("impl/none") ?? "", /branch not found: impl\/none/);
+    assert.match(v("impl/empty") ?? "", /has no commits beyond main/);
+    assert.match(v("impl/mine") ?? "", /no commit made by this server/);
+    assert.match(v("impl/ok", "impl/ok") ?? "", /branch you are on/);
+    assert.match(v("impl/ok; rm -rf") ?? "", /not a usable branch name/);
+    assert.ok(v("impl/../main"), "a traversal-looking name is refused one way or another");
+  });
+
+  it("a commit subject that only looks server-made does not count", () => {
+    for (const s of ["task-01: implement the thing", "Task-01: impl", "task-: impl", "task-01 impl", "task-01: deploy"]) {
+      const name = `impl/fake-${s.replace(/\W/g, "").slice(0, 12)}`;
+      mkBranch(name, [s]);
+      assert.match(v(name) ?? "", /no commit made by this server/, s);
+    }
+  });
+
+  it("planBranch cuts a new branch from the tip of an accepted branch and never continues onto it; history still wins for a branch it made", () => {
+    mkBranch("impl/01-a", ["task-01: impl"]);
+    const p = planBranch({ roleName: "fix", task: mkTask({ id: "01" }), targetRel: "specs/f/tasks/01-x.md", history: [], baseRef: "main", branchParam: "impl/01-a", currentBranch: "main" });
+    assert.deepEqual(p, { mode: "new", from: "impl/01-a", source: "impl/01-a" });
+    const t = planBranch({ roleName: "test", task: mkTask({ id: "01" }), targetRel: "specs/f/tasks/01-x.md", history: [], baseRef: "main", branchParam: "impl/01-a", currentBranch: "main" });
+    assert.deepEqual(t, { mode: "new", from: "impl/01-a", source: "impl/01-a" });
+    const known = planBranch({ roleName: "fix", task: mkTask({ id: "01" }), targetRel: "specs/f/tasks/01-x.md", history: [hist("01", "impl/01-a")], baseRef: "main", branchParam: "impl/01-a", currentBranch: "main" });
+    assert.deepEqual(known, { mode: "continue", branch: "impl/01-a", from: "impl/01-a" }, "a branch this server made is continued as before");
+    const bad = planBranch({ roleName: "fix", task: mkTask({ id: "01" }), targetRel: "x.md", history: [], baseRef: "main", branchParam: "feature/x", currentBranch: "main" });
+    assert.match((bad as { error: string }).error, /must start with/);
+  });
+
+  it("without a branch parameter and without history fix still says what to do, and test still starts from the base", () => {
+    const fix = planBranch({ roleName: "fix", task: mkTask(), targetRel: "x.md", history: [], baseRef: "main" });
+    assert.match((fix as { error: string }).error, /name an existing impl\/, fix\/, test\/ or do\/ branch/);
+    assert.deepEqual(planBranch({ roleName: "test", task: mkTask(), targetRel: "x.md", history: [], baseRef: "main" }), { mode: "new", from: "main" });
+  });
+
+  it("a later fix for the same branch name continues the job the server already ran for it (the source is remembered on the job)", () => {
+    mkBranch("impl/01-a", ["task-01: impl"]);
+    mkBranch("fix/01-first", ["task-01: fix"]);
+    const prior: Job = mkJob({ role: "fix", state: "done", targetRel: "specs/g/tasks/09-y.md", branch: "fix/01-first", sourceBranch: "impl/01-a" });
+    const p = planBranch({ roleName: "fix", task: mkTask({ id: "01" }), targetRel: "specs/f/tasks/01-x.md", history: [prior], baseRef: "main", branchParam: "impl/01-a", currentBranch: "main" });
+    assert.deepEqual(p, { mode: "continue", branch: "fix/01-first", from: "fix/01-first" });
   });
 });
 

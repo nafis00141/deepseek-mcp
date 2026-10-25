@@ -15,13 +15,43 @@ const featureOf = (rel: string | null | undefined): string => String(rel || "").
  *   impl        starts from the base branch, or from the single unmerged branch of a task it depends on.
  * Returns { mode: "new" | "continue", from, branch? } or { error }.
  */
-export type BranchPlan = { error: string } | { error?: undefined; mode: "new" | "continue"; from: string; branch?: string };
+export type BranchPlan = { error: string } | { error?: undefined; mode: "new" | "continue"; from: string; branch?: string; source?: string };
 
-export function planBranch({ roleName, task, targetRel, history, baseRef }: { roleName: string; task: Task | null | undefined; targetRel: string; history: Job[]; baseRef: string }): BranchPlan {
+/** Branch names a fix or test job may start from when this server has no job for them: the ones this tool family creates. */
+const EXTERNAL_PREFIXES = ["impl/", "fix/", "test/", "do/"];
+/** A commit subject the server itself writes (see commitWork): `task-<id>: <role>`. */
+const SERVER_COMMIT = /^task-[^:\s]+: (impl|fix|test|do)$/;
+
+/**
+ * May a fix or test job start from this existing branch, though no job in this server's history made it? The name must be one
+ * this tool family creates (never a branch people make for themselves), it must exist, must not be the base or the branch the human
+ * is on, must carry commits beyond the base, and at least one of them must have the server's own commit subject. The job never
+ * commits onto it: planBranch cuts a new branch from its tip.
+ */
+export function validateExternalBranch({ branch, baseRef, currentBranch }: { branch: string; baseRef: string; currentBranch: string }): string | null {
+  if (!SAFE.test(branch)) return `"${branch}" is not a usable branch name`;
+  if (branch === baseRef) return `${branch} is the base branch; fix and test work on a branch of their own`;
+  if (!EXTERNAL_PREFIXES.some((p) => branch.startsWith(p))) return `branch ${branch} must start with ${EXTERNAL_PREFIXES.join(", ")} (branches made by this tool family); other branches are never touched`;
+  if (!branchExists(branch)) return `branch not found: ${branch}`;
+  if (branch === currentBranch) return `${branch} is the branch you are on; switch away from it first`;
+  const subjects = git(["log", "--format=%s", `${baseRef}..${branch}`]).out.split(/\r?\n/).filter(Boolean);
+  if (!subjects.length) return `${branch} has no commits beyond ${baseRef}`;
+  if (!subjects.some((s) => SERVER_COMMIT.test(s))) return `${branch} has no commit made by this server (a subject like "task-01: impl"), so it is not a branch this tool family produced`;
+  return null;
+}
+
+export function planBranch({ roleName, task, targetRel, history, baseRef, branchParam, currentBranch }: { roleName: string; task: Task | null | undefined; targetRel: string; history: Job[]; baseRef: string; branchParam?: string | undefined; currentBranch?: string | undefined }): BranchPlan {
   if (roleName === "fix" || roleName === "test") {
-    const prev = history.filter((j) => j.targetRel === targetRel && CODE_ROLES.includes(j.role) && j.branch && j.state !== "interrupted" && branchExists(j.branch)).pop();
+    // A job this server already ran for this task (or for the branch the caller names) is continued: one branch per task, as before.
+    const prev = history.filter((j) => (j.targetRel === targetRel || (branchParam && j.sourceBranch === branchParam)) && CODE_ROLES.includes(j.role) && j.branch && j.state !== "interrupted" && branchExists(j.branch)).pop();
     if (prev?.branch) return { mode: "continue", branch: prev.branch, from: prev.branch };
-    if (roleName === "fix") return { error: `no branch to fix for ${targetRel}: run impl first (or its branch was deleted)` };
+    // Otherwise an existing branch the caller names, which is never committed onto: a new branch is cut from its tip.
+    if (branchParam) {
+      const problem = validateExternalBranch({ branch: branchParam, baseRef, currentBranch: currentBranch ?? "" });
+      if (problem) return { error: problem };
+      return { mode: "new", from: branchParam, source: branchParam };
+    }
+    if (roleName === "fix") return { error: `no branch to fix for ${targetRel}: run impl first (or its branch was deleted), or name an existing impl/, fix/, test/ or do/ branch with the branch parameter` };
   }
   const unmerged: string[] = [];
   for (const id of task?.dependsOn || []) {
