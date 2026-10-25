@@ -20,6 +20,8 @@ export interface CompareOpts {
   minNet: number;
   delta: number;
   heldoutTol: number;
+  /** The held-out look budget for this candidate is spent: the held-out guard cannot be applied, so KEEP is off the table. */
+  ignoreHeldout?: boolean;
 }
 
 export interface TaskDelta {
@@ -86,7 +88,7 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   const hb = heldOf(baseRows);
   const hc = heldOf(cand.rows);
   let heldout: Comparison["heldout"] = null;
-  if (hb.length && hc.length) {
+  if (hb.length && hc.length && !opts.ignoreHeldout) {
     const base = aggregate(hb);
     const c = aggregate(hc);
     const delta = r3(mean(c.hidden_pass) - mean(base.hidden_pass));
@@ -109,6 +111,10 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   } else {
     decision = "INCONCLUSIVE";
     reasons.push(net > 0 ? `net ${net} is below the required ${opts.minNet}: the direction is right but the dev set is too small to act on` : "no dev task changed by the required margin");
+  }
+  if (opts.ignoreHeldout) {
+    reasons.push("held-out look budget exhausted: the held-out guard was not applied, so this cannot be KEEP");
+    if (decision === "KEEP") decision = "INCONCLUSIVE";
   }
   const bTok = mean(aggregate(baseRows).tokens_total);
   const cTok = mean(aggregate(cand.rows).tokens_total);
@@ -150,7 +156,22 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error("usage: node eval/compare.ts --baseline a,b --candidate c [--min-net 2] [--delta 0.4] [--heldout-tol 0.1]");
     process.exit(1);
   }
-  const result = compareRuns(base.map(dir), dir(cand), { minNet: Number(get("min-net") ?? 2), delta: Number(get("delta") ?? 0.4), heldoutTol: Number(get("heldout-tol") ?? 0.1) });
+  // Every comparison that shows the held-out aggregate spends one look for that candidate; the budget is pre-registered.
+  const budget = Number(get("heldout-budget") ?? 4);
+  const lookFile = path.join(runs, "heldout-looks.json");
+  let looks: Record<string, number> = {};
+  try {
+    looks = JSON.parse(fs.readFileSync(lookFile, "utf8")) as Record<string, number>;
+  } catch {
+    /* first look */
+  }
+  const used = looks[path.basename(dir(cand))] ?? 0;
+  const ignoreHeldout = used >= budget;
+  if (!ignoreHeldout) {
+    looks[path.basename(dir(cand))] = used + 1;
+    fs.writeFileSync(lookFile, JSON.stringify(looks, null, 2));
+  }
+  const result = compareRuns(base.map(dir), dir(cand), { minNet: Number(get("min-net") ?? 2), delta: Number(get("delta") ?? 0.4), heldoutTol: Number(get("heldout-tol") ?? 0.1), ignoreHeldout });
   const text = renderComparison(result);
   fs.writeFileSync(path.join(dir(cand), "compare.md"), text);
   console.log(text);
