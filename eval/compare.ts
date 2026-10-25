@@ -46,8 +46,12 @@ export interface CompareOpts {
   afterResult?: Set<string>;
   /** Only compare dev tasks of this tier. */
   tier?: Tier;
-  /** Dev tasks only: no held-out guard, no look budget. Used by the chance check, never by a real decision. */
+  /** Dev tasks only: no held-out guard, no look budget. A screening verdict (and the chance check), never a real KEEP. */
   devOnly?: boolean;
+  /** Only compare dev tasks whose axis is one of these / is none of these / whose id is one of these. */
+  axes?: string[];
+  excludeAxes?: string[];
+  tasks?: string[];
 }
 
 /** The significance level of the final decision, one-sided. Fixed here and in eval/loop.md, before any final run. */
@@ -177,7 +181,8 @@ export function compareRuns(baselineDirs: string[], candidateDir: string, opts: 
   const cand = scoreRun(candidateDir);
   const baseRows = bases.flatMap((b) => b.rows);
   // Only dev drives gains and losses and only held-out is the regression guard; confirm and reserve rows belong to neither.
-  const devOf = (rows: RunRow[]): RunRow[] => rows.filter((r) => !isPrivate(r.split) && (!opts.tier || r.tier === opts.tier));
+  const devOf = (rows: RunRow[]): RunRow[] =>
+    rows.filter((r) => !isPrivate(r.split) && (!opts.tier || r.tier === opts.tier) && (!opts.axes || (r.axis !== null && opts.axes.includes(r.axis))) && !(r.axis !== null && opts.excludeAxes?.includes(r.axis)) && (!opts.tasks || opts.tasks.includes(r.task)));
   const heldOf = (rows: RunRow[]): RunRow[] => (opts.devOnly || opts.tier ? [] : rows.filter((r) => r.split === "heldout"));
   const bT = byTask(devOf(baseRows));
   const cT = byTask(devOf(cand.rows));
@@ -297,8 +302,9 @@ const k = (s: Stat | null): string => `${Math.round(mean(s) / 100) / 10}k`;
 
 export function renderComparison(c: Comparison): string {
   const out = [`# Compare - ${c.candidate} vs ${c.baselines.join(" + ")}`, ""];
+  if (c.opts.devOnly) out.push("**SCREENING comparison: dev tasks only, no held-out guard, no look spent. A KEEP here is not a KEEP in the loop; the real decision is the candidate branch's normal comparison.**", "");
   out.push(`Rule: a dev task is a gain/loss when its hidden-pass mean moves by >= ${c.opts.delta}; KEEP needs net >= ${c.opts.minNet} and held-out within the tolerance below.`, "");
-  out.push(`## Decision: ${c.decision}`, "", ...c.reasons.map((r) => `- ${r}`), "");
+  out.push(`## ${c.opts.devOnly ? "Screening verdict" : "Decision"}: ${c.decision}`, "", ...c.reasons.map((r) => `- ${r}`), "");
   out.push("## Dev tasks (hidden pass, paired)", "", "| task | tier | band | family | hidden pass | change | false accept | compliance | tokens | noise between baselines | |", "|---|---|---|---|---|---|---|---|---|---|---|");
   for (const d of c.dev) out.push(`| ${d.task} | ${d.tier}${d.after_result ? " (after result)" : ""} | ${d.band ?? "-"} | ${d.family} | ${arrow(d.base.hidden_pass, d.cand.hidden_pass)} | ${sign(d.delta)} | ${arrow(d.base.false_accept, d.cand.false_accept)} | ${arrow(d.base.compliance, d.cand.compliance)} | ${k(d.base.tokens_total)} -> ${k(d.cand.tokens_total)} | ${d.noise === null ? "-" : sign(d.noise)} | ${d.verdict === "same" ? "" : d.counted ? d.verdict : `${d.verdict} (not counted)`} |`);
   out.push("", `gains ${c.gains}, losses ${c.losses}, net ${c.net}; net without tasks authored after a result: ${c.net_clean}`, "");
@@ -333,7 +339,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const base = get("baseline")?.split(",").map((s) => s.trim()).filter(Boolean);
   const cand = get("candidate");
   if (!base?.length || !cand) {
-    console.error("usage: node eval/compare.ts --baseline a,b --candidate c [--min-net 2] [--delta 0.4] [--heldout-tol 0.1] [--final]");
+    console.error("usage: node eval/compare.ts --baseline a,b --candidate c [--min-net 2] [--delta 0.4] [--heldout-tol 0.1] [--final] [--dev-only] [--axis a,b] [--exclude-axis a] [--tasks id,id]");
     process.exit(1);
   }
   // Every comparison that shows the held-out aggregate spends one look, keyed by the candidate's lineage (the src/ tree it was
@@ -349,10 +355,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const bands = loadBands(evalDir);
   const afterResult = new Set(loadTasks([path.join(evalDir, "tasks")], ["dev"]).filter((t) => t.authored_after_result === true).map((t) => t.id));
   const stale = frozenProblem(evalDir);
-  const look = spendLook(path.join(runs, "heldout-looks.json"), candLineage, Number(get("heldout-budget") ?? 4), Number(get("heldout-total") ?? 12));
-  const result = compareRuns(base.map(dir), dir(cand), { minNet: Number(get("min-net") ?? 2), delta: Number(get("delta") ?? 0.4), ...(get("heldout-tol") !== undefined ? { heldoutTol: Number(get("heldout-tol")) } : {}), ignoreHeldout: !look.allowed, looks: look, final: args.includes("--final"), bands, afterResult });
+  const devOnly = args.includes("--dev-only");
+  const list = (k: string): string[] | undefined => get(k)?.split(",").map((s) => s.trim()).filter(Boolean);
+  // A screening comparison reads no held-out rows, so it must not spend a look either.
+  const look = devOnly ? { allowed: true, lineage_used: 0, lineage_budget: 0, lineage_left: 0, total_used: 0, total_budget: 0, total_left: 0, reason: "" } : spendLook(path.join(runs, "heldout-looks.json"), candLineage, Number(get("heldout-budget") ?? 4), Number(get("heldout-total") ?? 12));
+  const result = compareRuns(base.map(dir), dir(cand), { minNet: Number(get("min-net") ?? 2), delta: Number(get("delta") ?? 0.4), ...(get("heldout-tol") !== undefined ? { heldoutTol: Number(get("heldout-tol")) } : {}), ignoreHeldout: !look.allowed, ...(devOnly ? {} : { looks: look }), final: args.includes("--final") && !devOnly, bands, afterResult, devOnly, ...(list("axis") ? { axes: list("axis")! } : {}), ...(list("exclude-axis") ? { excludeAxes: list("exclude-axis")! } : {}), ...(list("tasks") ? { tasks: list("tasks")! } : {}) });
   if (stale) result.reasons.push(stale);
   const text = renderComparison(result);
-  fs.writeFileSync(path.join(dir(cand), "compare.md"), text);
+  fs.writeFileSync(path.join(dir(cand), devOnly ? "compare-screening.md" : "compare.md"), text);
   console.log(text);
 }

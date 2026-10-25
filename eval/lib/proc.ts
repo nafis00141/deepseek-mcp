@@ -5,8 +5,14 @@ import type { ChildProcess } from "node:child_process";
 /** Variables a child may inherit. Everything else - above all DEEPSEEK_* and any key or token - is left out. */
 const INHERIT = ["path", "systemroot", "windir", "comspec", "pathext", "temp", "tmp", "home", "userprofile", "homedrive", "homepath", "programfiles", "programfiles(x86)", "programdata", "git_bin", "lang", "tz"];
 
-/** Server settings a task or the runner may pass through to the server under test. */
-export const SERVER_SETTINGS = ["DEEPSEEK_MODEL", "DEEPSEEK_EFFORT", "DEEPSEEK_THINKING", "MAX_TOKENS", "MAX_TURNS", "TIMEOUT_MS", "REQUEST_TIMEOUT_MS", "MAX_REPAIRS", "CONTEXT_CHARS", "MAX_FIX_ROUNDS", "DIFF_CAP", "MAX_WAIT_S"];
+/** Context-window settings (Specs/long-context). They are an arm's property, so a task may not override them: that would not show in the manifest. */
+export const CONTEXT_SETTINGS = ["CONTEXT_MODE", "COMPACT_CHARS", "COMPACT_LOW", "CONTEXT_TOKENS", "CONTEXT_WINDOW", "READ_BUDGET_CHARS", "READ_MAX_LINES", "RESULT_LIMIT_CHARS", "MAX_REQUEST_BYTES", "JOB_INPUT_TOKEN_CAP"];
+
+/** Server settings a runner may pass through to the server under test. */
+const TASK_SETTINGS = ["DEEPSEEK_MODEL", "DEEPSEEK_EFFORT", "DEEPSEEK_THINKING", "MAX_TOKENS", "MAX_TURNS", "TIMEOUT_MS", "REQUEST_TIMEOUT_MS", "MAX_REPAIRS", "CONTEXT_CHARS", "MAX_FIX_ROUNDS", "DIFF_CAP", "MAX_WAIT_S"];
+export const SERVER_SETTINGS = [...TASK_SETTINGS, ...CONTEXT_SETTINGS];
+/** The settings a task's own env may still set. */
+export const TASK_ENV_SETTINGS = TASK_SETTINGS;
 
 /** An explicit allowlist, not a copy of process.env. The running Node comes first on PATH so test commands use it. */
 export function allowlistEnv(extra: Record<string, string | undefined> = {}, from: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {

@@ -179,6 +179,15 @@ describe("fixture repo", () => {
     assert.throws(() => loadTasks(roots, ["dev"]), /task id "d1" is used twice/);
   });
 
+  it("a task may not set the context-window settings in its env; its other settings still pass", () => {
+    const root = path.join(scratch, "tasks-env");
+    const def = (id: string, env: object) => JSON.stringify({ id, family: "ask", split: "dev", title: id, env, steps: [], checks: [], expect: { gate: "done" } });
+    put(root, "fine/task.json", def("fine", { MAX_TURNS: "5" }));
+    assert.deepEqual(loadTasks([root], ["dev"]).map((t) => t.id), ["fine"]);
+    put(root, "bad/task.json", def("bad", { MAX_TURNS: "5", CONTEXT_MODE: "extended", JOB_INPUT_TOKEN_CAP: "9" }));
+    assert.throws(() => loadTasks([root], ["dev"]), /env may not set CONTEXT_MODE, JOB_INPUT_TOKEN_CAP: context settings belong to the arm/);
+  });
+
   it("loads tasks, filtering by split", () => {
     const root = path.join(scratch, "tasks-a");
     for (const [id, split] of [["t-dev", "dev"], ["t-held", "heldout"]]) put(root, `${id}/task.json`, JSON.stringify({ id, family: "ask", split, title: id, steps: [], checks: [], expect: { gate: "done" } }));
@@ -295,9 +304,11 @@ describe("runner end to end (real server, stub upstream)", () => {
     assert.equal(trace[1]?.reasoning_tokens, 7);
     assert.deepEqual([trace[2]?.status, trace[3]?.state], ["done", "done"]);
     for (const f of ["checks.json", "step1.json", "step1.prompt.txt", "step1.final.txt", "server.stderr.log"]) assert.ok(fs.existsSync(path.join(out, f)), f);
-    const manifest = JSON.parse(fs.readFileSync(path.join(r.runDir, "manifest.json"), "utf8")) as { server_hash: string; settings: Record<string, string> };
+    const manifest = JSON.parse(fs.readFileSync(path.join(r.runDir, "manifest.json"), "utf8")) as { server_hash: string; settings: Record<string, string>; timeouts: { task_s: number; upstream_s: number } };
     assert.match(manifest.server_hash, /^[0-9a-f]{40}$/);
     assert.equal(manifest.settings.DEEPSEEK_MODEL, "deepseek-flash");
+    assert.equal(typeof manifest.timeouts.task_s, "number", "the task timeout is recorded");
+    assert.equal(manifest.timeouts.upstream_s, 330, "the proxy's upstream timeout is recorded (default)");
     assert.equal(findSecret([r.runDir, scratch + path.sep + "runs"], KEY), null, "key appears in no run file");
     assert.ok(fs.existsSync(path.join(r.runDir, "server", "src", "server.ts")), "server code is pinned in the run folder");
     assert.equal(JSON.parse(fs.readFileSync(path.join(scratch, "runs", "last-usage.json"), "utf8")).mean_tokens, 120);
@@ -307,6 +318,15 @@ describe("runner end to end (real server, stub upstream)", () => {
     const again = await runEval(opts(up.url, { only: ["ask-stub"], resume: true }));
     assert.equal(again.records[0]?.complete, true);
     assert.equal(up.seen.length, n);
+    await up.close();
+  });
+
+  it("context settings given to the runner are recorded in the manifest, and so is a changed upstream timeout", async () => {
+    const up = await stubUpstream();
+    const r = await runEval(opts(up.url, { only: ["ask-stub"], runId: "r-context", upstreamTimeoutS: 900, serverEnv: { ...process.env, CONTEXT_MODE: "extended", READ_MAX_LINES: "2000", JOB_INPUT_TOKEN_CAP: "6000000" } }));
+    const m = JSON.parse(fs.readFileSync(path.join(r.runDir, "manifest.json"), "utf8")) as { settings: Record<string, string>; timeouts: { upstream_s: number } };
+    assert.deepEqual([m.settings.CONTEXT_MODE, m.settings.READ_MAX_LINES, m.settings.JOB_INPUT_TOKEN_CAP, m.timeouts.upstream_s], ["extended", "2000", "6000000", 900]);
+    assert.equal(r.records[0]?.complete, true, "the server accepts the settings and finishes the job");
     await up.close();
   });
 

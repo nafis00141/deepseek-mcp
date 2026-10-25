@@ -16,7 +16,7 @@ import { CFG } from "../src/config.ts";
 import { runChecks } from "./lib/checks.ts";
 import { loadTasks, makeRepo, removeDir, runSetup, taskRoots } from "./lib/fixture.ts";
 import { McpClient } from "./lib/mcp.ts";
-import { SERVER_SETTINGS, allowlistEnv } from "./lib/proc.ts";
+import { SERVER_SETTINGS, TASK_ENV_SETTINGS, allowlistEnv } from "./lib/proc.ts";
 import { computeLineage, heldoutSetHash } from "./lib/lineage.ts";
 import { isPrivate, labelOf, runSubdir } from "./lib/privacy.ts";
 import { startProxy } from "./lib/proxy.ts";
@@ -46,6 +46,8 @@ export interface EvalOpts {
   /** Use this directory's src/ and package.json as the code under test (a previous run's `server/` folder) instead of the working tree. */
   serverSrc?: string | undefined;
   taskTimeoutS: number;
+  /** how long the proxy waits for one upstream reply (default 330) */
+  upstreamTimeoutS?: number | undefined;
   resume: boolean;
   allowDirty: boolean;
   apiKey: string;
@@ -223,12 +225,12 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
       purpose: prevManifest?.purpose !== undefined ? prevManifest.purpose : o.purpose ?? null,
       heldout_hash: prevManifest?.heldout_hash !== undefined ? prevManifest.heldout_hash : held?.hash ?? null,
       heldout_count: prevManifest?.heldout_count !== undefined ? prevManifest.heldout_count : held?.count ?? null,
-      dirty: prevManifest?.dirty ?? Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null },
+      dirty: prevManifest?.dirty ?? Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null }, timeouts: { task_s: o.taskTimeoutS, upstream_s: o.upstreamTimeoutS ?? 330 },
       pricing: o.pricing ?? null, tasks: [...new Set([...(prevManifest?.tasks ?? []), ...tasks.map((t) => labelOf(t))])].sort(), skipped: skipped.map((t) => ({ id: labelOf(t), needs_role: t.needs_role })),
     }, null, 2)
   );
 
-  const proxy = await startProxy({ upstream: o.upstream, apiKey: o.apiKey, ...(o.maxTokens !== undefined ? { maxTokens: o.maxTokens } : {}), ...(o.maxCost !== undefined ? { maxCost: o.maxCost } : {}), ...(o.pricing ? { pricing: o.pricing } : {}) });
+  const proxy = await startProxy({ upstream: o.upstream, apiKey: o.apiKey, ...(o.upstreamTimeoutS !== undefined ? { upstreamTimeoutMs: o.upstreamTimeoutS * 1000 } : {}), ...(o.maxTokens !== undefined ? { maxTokens: o.maxTokens } : {}), ...(o.maxCost !== undefined ? { maxCost: o.maxCost } : {}), ...(o.pricing ? { pricing: o.pricing } : {}) });
   const records: RunRecord[] = [];
   let aborted: string | null = null;
 
@@ -252,7 +254,7 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
     try {
       await runSetup(task, fx);
       const taskSettings = { ...settings };
-      for (const [key, v] of Object.entries(task.env ?? {})) if (SERVER_SETTINGS.includes(key)) taskSettings[key] = v;
+      for (const [key, v] of Object.entries(task.env ?? {})) if (TASK_ENV_SETTINGS.includes(key)) taskSettings[key] = v;
       client = new McpClient(serverEntry, allowlistEnv({ ...taskSettings, REPO_ROOT: fx.repo, GIT_BIN: o.gitBin, DEEPSEEK_API_KEY: sess.bearer, DEEPSEEK_BASE_URL: proxy.url }), fx.repo);
       await client.start();
       for (const [i, def] of task.steps.entries()) {
@@ -429,6 +431,7 @@ async function main(): Promise<void> {
     arm: oneOf(a.arm, ["baseline", "candidate"], "--arm"),
     purpose: oneOf(a.purpose, ["calibration", "comparison"], "--purpose"),
     taskTimeoutS: num(a["task-timeout"]) ?? 1200,
+    upstreamTimeoutS: num(a["upstream-timeout"]),
     resume: a.resume === true,
     allowDirty: a["allow-dirty"] === true,
     apiKey: process.env.DEEPSEEK_API_KEY ?? "",

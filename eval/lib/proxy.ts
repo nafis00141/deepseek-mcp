@@ -17,6 +17,8 @@ export interface ProxyOpts {
   maxTokens?: number;
   maxCost?: number;
   pricing?: Pricing;
+  /** How long to wait for one upstream reply (default 330000). A near-limit request can take longer. */
+  upstreamTimeoutMs?: number;
 }
 
 export interface ProxySession {
@@ -79,7 +81,7 @@ export async function startProxy(opts: ProxyOpts): Promise<Proxy> {
             method: "POST",
             headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
             body,
-            signal: AbortSignal.timeout(330000),
+            signal: AbortSignal.timeout(opts.upstreamTimeoutMs ?? 330000),
           });
           const text = await up.text();
           try {

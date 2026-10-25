@@ -1,11 +1,12 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { removeDir } from "../eval/lib/fixture.ts";
 import { BAND_HIGH, BAND_LOW, MAX_ROUNDS, MIN_RUNS, bandOf, calibrate, frozenProblem, loadBands, loadCalibration, taskSetHash } from "../eval/lib/calibration.ts";
-import { compareRuns } from "../eval/compare.ts";
+import { compareRuns, renderComparison } from "../eval/compare.ts";
 import type { CompareOpts } from "../eval/compare.ts";
 import { MAX_FALSE_KEEP, chanceCheck, renderChance } from "../eval/chance.ts";
 import type { Band } from "../eval/lib/calibration.ts";
@@ -166,6 +167,35 @@ describe("compare: bands and provenance", () => {
     const c = base("t6c5", { a: rate(5, 5) });
     assert.throws(() => compareRuns([cal], c, opts()), /t6cal is a calibration run and cannot be a comparison baseline/);
     assert.doesNotThrow(() => compareRuns([base("t6ok", { a: rate(0, 5) })], c, opts()));
+  });
+
+  it("a dev-only comparison says it is a screening verdict, and the axis and task filters pick the tasks", () => {
+    const tier = { x1: "hard", x2: "hard", r1: "regression" } as const;
+    const b = base("t6b7", { x1: rate(0, 5), x2: rate(0, 5), r1: rate(5, 5) }, { tier });
+    const c = base("t6c7", { x1: rate(5, 5), x2: rate(5, 5), r1: rate(0, 5) }, { tier });
+    const all = compareRuns([b], c, opts({ devOnly: true }));
+    assert.deepEqual([all.gains, all.losses, all.decision], [2, 1, "INCONCLUSIVE"]);
+    assert.match(renderComparison(all), /\*\*SCREENING comparison: dev tasks only, no held-out guard, no look spent/);
+    assert.match(renderComparison(all), /## Screening verdict: INCONCLUSIVE/);
+    assert.doesNotMatch(renderComparison(compareRuns([b], c, opts())), /SCREENING/);
+    const xl = compareRuns([b], c, opts({ devOnly: true, axes: ["long-context"] }));
+    assert.deepEqual([xl.dev.map((d) => d.task), xl.gains, xl.losses, xl.decision], [["x1", "x2"], 2, 0, "KEEP"]);
+    const guard = compareRuns([b], c, opts({ devOnly: true, excludeAxes: ["long-context"] }));
+    assert.deepEqual([guard.dev.map((d) => d.task), guard.losses], [["r1"], 1], "tasks with no axis are never excluded by an axis list");
+    assert.deepEqual(compareRuns([b], c, opts({ devOnly: true, tasks: ["x2", "r1"] })).dev.map((d) => d.task), ["r1", "x2"]);
+  });
+
+  it("the --dev-only command line spends no held-out look and writes compare-screening.md", () => {
+    const b = base("t6b8", { x1: rate(0, 5), x2: rate(0, 5) });
+    const c = base("t6c8", { x1: rate(5, 5), x2: rate(5, 5) });
+    const looks = path.join(import.meta.dirname, "..", "runs", "heldout-looks.json");
+    const before = fs.existsSync(looks) ? fs.readFileSync(looks, "utf8") : null;
+    const cli = spawnSync(process.execPath, [path.join(import.meta.dirname, "..", "eval", "compare.ts"), "--baseline", b, "--candidate", c, "--dev-only", "--axis", "long-context"], { encoding: "utf8" });
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.match(cli.stdout, /## Screening verdict: KEEP/);
+    assert.equal(fs.existsSync(path.join(c, "compare-screening.md")), true);
+    assert.equal(fs.existsSync(path.join(c, "compare.md")), false);
+    assert.equal(fs.existsSync(looks) ? fs.readFileSync(looks, "utf8") : null, before, "the look budget file is untouched");
   });
 
   it("with a tier filter only that tier is compared", () => {

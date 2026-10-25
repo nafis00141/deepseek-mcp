@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { CFG } from "./config.ts";
+import { CFG, configProblem } from "./config.ts";
 import {
   childEnv,
   allJobs,
@@ -135,7 +135,7 @@ async function executeJob(jobId: string, ctx: { prompt: string; caps: Caps; mode
     const summary = parseSummary(out.finalText);
     const gap = GAP_RE.exec(out.finalText || "")?.[1]?.trim() ?? null;
     saveFinal(jobId, out.finalText);
-    res = { isError: false, turns: out.turns, usage: out.usage, result: out.finalText, summary, gap, exhausted: out.exhausted, repairs: out.repairs };
+    res = { isError: false, turns: out.turns, usage: out.usage, result: out.finalText, summary, gap, exhausted: out.exhausted, ...(out.exhaustedReason ? { exhaustedReason: out.exhaustedReason } : {}), repairs: out.repairs };
 
     if (ctx.mode === "code" && !gap) {
       const c = commitWork(job, ctx.task);
@@ -492,5 +492,9 @@ server.tool(
 server.tool("jobs", "List recent handoffs with their state.", {}, async () => json(listJobs(12)));
 
 process.on("unhandledRejection", (e) => log("unhandled rejection:", String(e)));
+if (configProblem) {
+  console.error(`[handoff] ${configProblem}`);
+  process.exit(1);
+}
 await server.connect(new StdioServerTransport());
 log(`ready - repo=${CFG.repo} base=${CFG.baseRef} model=${CFG.model} roles=${ROLE_NAMES.length}`);

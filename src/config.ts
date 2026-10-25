@@ -73,7 +73,83 @@ function pick<T extends string>(v: string | undefined, allowed: readonly T[], df
 const thinking = pick(env.DEEPSEEK_THINKING, ["enabled", "disabled"] as const, "enabled", "DEEPSEEK_THINKING");
 const effort = pick(env.DEEPSEEK_EFFORT, ["low", "high", "max"] as const, "high", "DEEPSEEK_EFFORT");
 
-export interface Config {
+/** How old tool results are cut when the conversation grows: `legacy` is the original behaviour, `extended` the cache-friendly one (Specs/long-context). */
+export type ContextMode = "legacy" | "extended";
+
+/** The limits that decide how much of the model's context window a job may use. Every default is the value that was hard-coded before. */
+export interface ContextSettings {
+  contextMode: ContextMode;
+  /** conversation size (characters of JSON) at which old tool results start being cut */
+  compactChars: number;
+  /** fraction of the budget to cut down to once cutting starts; 0 = cut only as far as needed */
+  compactLow: number;
+  /** token budget for the conversation (0 = use compactChars); needs contextWindow */
+  contextTokens: number;
+  contextWindow: number;
+  readBudgetChars: number;
+  readMaxLines: number;
+  resultLimitChars: number;
+  /** refuse to send a request body larger than this (0 = no check) */
+  maxRequestBytes: number;
+  /** end a job once its cumulative input tokens reach this (0 = no cap) */
+  jobInputTokenCap: number;
+}
+
+export const CONTEXT_MARGIN_TOKENS = 50000; // room kept below the window on top of MAX_TOKENS
+
+/**
+ * Read and validate the context settings from an environment. Throws one Error naming every bad variable, so a typo fails
+ * at start-up instead of silently running with a different limit. An empty variable counts as unset.
+ */
+export function loadContextSettings(e: NodeJS.ProcessEnv, maxTokens: number): ContextSettings {
+  const bad: string[] = [];
+  const raw = (name: string): string | undefined => {
+    const v = e[name];
+    return v === undefined || String(v).trim() === "" ? undefined : String(v).trim();
+  };
+  const int = (name: string, dflt: number, min: number, max: number): number => {
+    const v = raw(name);
+    if (v === undefined) return dflt;
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      bad.push(`${name}="${v}" must be an integer from ${min} to ${max}`);
+      return dflt;
+    }
+    return n;
+  };
+  const modeRaw = raw("CONTEXT_MODE")?.toLowerCase();
+  let contextMode: ContextMode = "legacy";
+  if (modeRaw === "legacy" || modeRaw === "extended") contextMode = modeRaw;
+  else if (modeRaw !== undefined) bad.push(`CONTEXT_MODE="${modeRaw}" must be legacy or extended`);
+  let compactLow = 0;
+  const lowRaw = raw("COMPACT_LOW");
+  if (lowRaw !== undefined) {
+    const n = Number(lowRaw);
+    if (!(n > 0 && n <= 1)) bad.push(`COMPACT_LOW="${lowRaw}" must be a number above 0 and at most 1`);
+    else compactLow = n;
+  }
+  const s: ContextSettings = {
+    contextMode,
+    compactChars: int("COMPACT_CHARS", 220000, 1000, 16_000_000),
+    compactLow,
+    contextTokens: int("CONTEXT_TOKENS", 0, 0, 4_000_000),
+    contextWindow: int("CONTEXT_WINDOW", 0, 0, 4_000_000),
+    readBudgetChars: int("READ_BUDGET_CHARS", 30000, 100, 4_000_000),
+    readMaxLines: int("READ_MAX_LINES", 400, 1, 200_000),
+    resultLimitChars: int("RESULT_LIMIT_CHARS", 45000, 1000, 16_000_000),
+    maxRequestBytes: int("MAX_REQUEST_BYTES", 0, 0, 128_000_000),
+    jobInputTokenCap: int("JOB_INPUT_TOKEN_CAP", 0, 0, 2_000_000_000),
+  };
+  if ((s.contextTokens > 0) !== (s.contextWindow > 0)) bad.push("CONTEXT_TOKENS and CONTEXT_WINDOW must be set together");
+  else if (s.contextTokens > 0 && s.contextMode !== "extended") bad.push("CONTEXT_TOKENS needs CONTEXT_MODE=extended");
+  else if (s.contextTokens > 0 && s.contextTokens + maxTokens + CONTEXT_MARGIN_TOKENS > s.contextWindow) {
+    bad.push(`CONTEXT_TOKENS ${s.contextTokens} + MAX_TOKENS ${maxTokens} + ${CONTEXT_MARGIN_TOKENS} margin does not fit in CONTEXT_WINDOW ${s.contextWindow}`);
+  }
+  if (bad.length) throw new Error(`invalid context settings: ${bad.join("; ")}`);
+  return s;
+}
+
+export interface Config extends ContextSettings {
   root: string;
   repo: string;
   git: string;
@@ -97,7 +173,23 @@ export interface Config {
   jobs: string;
 }
 
+const maxTokensSetting = Number(env.MAX_TOKENS || (thinking === "enabled" ? 32000 : 8000));
+
+/**
+ * A bad context setting must stop the server, but not every program that imports this module (the eval runner and the
+ * tests read CFG too). So the problem is kept here, the defaults are used, and the server's start-up refuses to run.
+ */
+let contextSettings: ContextSettings;
+export let configProblem: string | null = null;
+try {
+  contextSettings = loadContextSettings(env, maxTokensSetting);
+} catch (e) {
+  configProblem = (e as Error).message;
+  contextSettings = loadContextSettings({}, maxTokensSetting);
+}
+
 export const CFG: Config = {
+  ...contextSettings,
   root: ROOT,
   repo: path.resolve(env.REPO_ROOT || process.cwd()),
   git: discoverGit(),
@@ -112,7 +204,7 @@ export const CFG: Config = {
   thinking, // "enabled" | "disabled": DeepSeek thinking mode (default enabled)
   effort, // "low" | "high" | "max": reasoning effort, sent only while thinking is enabled (default high)
   // Reasoning tokens count against max_tokens, so thinking needs a much larger budget than plain replies.
-  maxTokens: Number(env.MAX_TOKENS || (thinking === "enabled" ? 32000 : 8000)),
+  maxTokens: maxTokensSetting,
   baseRef: env.BASE_REF || null, // BASE_REF pins it; otherwise detected from the repo at each handoff
   maxWaitS: Number(env.MAX_WAIT_S || 45), // longest a tool call blocks; keeps under the client's tool timeout
   maxRepairs: Number(env.MAX_REPAIRS ?? 2), // in-job repair attempts after a failed self-check, before the gate judges

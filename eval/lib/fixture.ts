@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { CONTEXT_SETTINGS } from "./proc.ts";
 import { TIERS, tierOf } from "./types.ts";
 import type { LoadedTask, Split, TaskDef } from "./types.ts";
 
@@ -34,6 +35,8 @@ export function loadTasks(roots: string[], splits: Split[]): LoadedTask[] {
       const prior = seen.get(def.id);
       if (prior) throw new Error(`task id "${def.id}" is used twice: ${prior} and ${file}`);
       seen.set(def.id, file);
+      const forbidden = Object.keys(def.env ?? {}).filter((k) => CONTEXT_SETTINGS.includes(k));
+      if (forbidden.length) throw new Error(`${file}: env may not set ${forbidden.join(", ")}: context settings belong to the arm and are recorded in its manifest, not to a task`);
       if (def.tier !== undefined && !TIERS.includes(def.tier)) throw new Error(`${file}: tier "${String(def.tier)}" must be one of ${TIERS.join(", ")}`);
       if (tierOf(def) === "hard" && !def.axis) throw new Error(`${file}: a hard task must name its axis`);
       if (mustBe && def.split !== mustBe) throw new Error(`${file}: split "${def.split}" does not match the folder "${path.basename(root)}" (expected "${mustBe}")`);

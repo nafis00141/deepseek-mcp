@@ -77,8 +77,6 @@ Rules:
 - When the task is complete, stop calling tools and write your final answer.
 - Your final answer must end with a single fenced json block and nothing after it.`;
 
-const READ_BUDGET = 30000; // chars of file content per read_file call
-const RESULT_LIMIT = 45000; // chars of any one tool result kept in the conversation
 const DIFF_CHUNK = 30000; // chars of diff per git_diff call
 
 /* --------------------------------------------------------------- line endings */
@@ -151,15 +149,16 @@ const TOOL_DEFS = {
       if (isDeniedRead(rel(abs))) return { error: `not permitted to read ${toPosix(p)}` };
       const lines = fs.readFileSync(abs, "utf8").split(/\r?\n/);
       const a = Math.max(1, start || 1);
-      const last = Math.min(lines.length, end || a + 399, a + 399);
+      const last = Math.min(lines.length, end || a + CFG.readMaxLines - 1, a + CFG.readMaxLines - 1);
       // Stop at a character budget so the tool result is never cut mid-line by the transport.
       const out: string[] = [];
       let size = 0;
       let b = a - 1;
       for (let i = a; i <= last; i++) {
         const l = `${i}\t${lines[i - 1]}`;
-        if (size + l.length > READ_BUDGET && out.length) break;
-        out.push(l.slice(0, READ_BUDGET));
+        if (size + l.length > CFG.readBudgetChars && out.length) break;
+        // legacy: a single over-long line is sliced at the budget; extended: it is cut with a visible marker
+        out.push(l.length > CFG.readBudgetChars ? (CFG.contextMode === "extended" ? `${l.slice(0, CFG.readBudgetChars)} [line cut at ${CFG.readBudgetChars} chars]` : l.slice(0, CFG.readBudgetChars)) : l);
         size += l.length + 1;
         b = i;
       }
@@ -326,7 +325,7 @@ function availableTools(caps: Caps): ToolSchema[] {
 }
 
 /** Keep a tool result as valid JSON under the limit, instead of slicing it mid-string. */
-export function packResult(out: unknown, limit = RESULT_LIMIT): string {
+export function packResult(out: unknown, limit = CFG.resultLimitChars): string {
   const s = JSON.stringify(out);
   if (s.length <= limit) return s;
   return JSON.stringify({ error: `result too large (${s.length} chars); narrow the request or page it`, preview: s.slice(0, limit - 300) });
@@ -387,6 +386,10 @@ async function chat(messages: ChatMessage[], tools: ToolSchema[], signal?: Abort
   const body = requestBody(messages, tools);
   const headers: Record<string, string> = { "content-type": "application/json", authorization: `Bearer ${CFG.key}` };
   const payload = JSON.stringify(body);
+  if (CFG.maxRequestBytes > 0) {
+    const bytes = Buffer.byteLength(payload);
+    if (bytes > CFG.maxRequestBytes) throw new Error(`request body is ${bytes} bytes, over MAX_REQUEST_BYTES (${CFG.maxRequestBytes}); not sent`);
+  }
 
   const attempts = 4;
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -461,6 +464,11 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
 
   while (turns < CFG.maxTurns) {
     if (signal?.aborted) return { finalText: "", turns, usage, exhausted: false, aborted: true, repairs };
+    // The job guard looks at what the provider already reported, so the overshoot is at most one request.
+    if (CFG.jobInputTokenCap > 0 && usage.input >= CFG.jobInputTokenCap) {
+      logLine(`input token cap (${CFG.jobInputTokenCap}) reached after ${turns} turn(s): ${usage.input} input tokens`);
+      return { finalText: "", turns, usage, exhausted: true, exhaustedReason: "input_tokens", repairs };
+    }
     turns++;
     const t0 = Date.now();
     const data = await chat(compact(messages), tools, signal, trace);
@@ -525,5 +533,5 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
     }
   }
   logLine(`max turns (${CFG.maxTurns}) reached`);
-  return { finalText: "", turns, usage, exhausted: true, repairs };
+  return { finalText: "", turns, usage, exhausted: true, exhaustedReason: "turns", repairs };
 }
