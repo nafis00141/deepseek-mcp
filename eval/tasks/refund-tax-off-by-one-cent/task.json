@@ -1,0 +1,38 @@
+{
+  "id": "refund-tax-off-by-one-cent",
+  "family": "code",
+  "split": "dev",
+  "title": "make tests/invoice.test.js pass: the refund tax is one cent off",
+  "tier": "hard",
+  "axis": "remote-cause",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/tax/tasks/01-refund-tax.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/tax.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/invoice.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

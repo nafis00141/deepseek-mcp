@@ -1,0 +1,38 @@
+{
+  "id": "slugify-max-length-project-gates",
+  "family": "code",
+  "split": "dev",
+  "title": "slugify gets a maxLength option; the project's CI command must pass",
+  "tier": "hard",
+  "axis": "multi-repair",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/slug/tasks/01-max-length.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/slug.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node scripts/ci.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

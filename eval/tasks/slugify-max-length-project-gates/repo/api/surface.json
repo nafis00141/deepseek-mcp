@@ -1,0 +1,5 @@
+{
+  "src/text/slug.js": { "slugify": "text", "isSlug": "text" },
+  "src/text/words.js": { "words": "text" },
+  "src/util/clamp.js": { "clamp": "n, lo, hi" }
+}
