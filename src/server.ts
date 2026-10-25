@@ -31,6 +31,7 @@ import { ROLES, ROLE_NAMES, buildPrompt } from "./roles.ts";
 import { capsFor, ping as pingModel, runAgent } from "./engine.ts";
 import { GAP_RE, gate, makeVerifier } from "./gates.ts";
 import { buildContextPack } from "./context.ts";
+import { traceSink } from "./trace.ts";
 import { branchExists, discardBranch, latestBranchFor, planBranch, restoreBranch } from "./branching.ts";
 import { isDeniedWrite, matchAny, readTask, scopeFor, scopeProblems } from "./taskfile.ts";
 import type { Task } from "./taskfile.ts";
@@ -113,11 +114,14 @@ async function executeJob(jobId: string, ctx: { prompt: string; caps: Caps; mode
   let res: ExecResult | null = null;
   let aborted = false;
   const ctrl = new AbortController();
+  const trace = traceSink(jobId);
+  trace({ type: "job_start", role: job.role, model: CFG.model, effort: CFG.thinking === "enabled" ? CFG.effort : null, thinking: CFG.thinking, prompt_chars: ctx.prompt.length, pack_chars: job.packChars, target: job.targetRel });
   const agent = runAgent({
     prompt: ctx.prompt,
     caps: ctx.caps,
     logPath: job.logPath,
     signal: ctrl.signal,
+    trace,
     verify: makeVerifier(ctx.mode, ctx.task),
     onProgress: (m) => progress.set(jobId, m),
   });
@@ -151,9 +155,11 @@ async function executeJob(jobId: string, ctx: { prompt: string; caps: Caps; mode
   } catch (e) {
     result = { status: "failed", reasons: [`gate error: ${(e as Error).message}`] };
   }
+  trace({ type: "gate", status: result.status, reasons: (result.reasons ?? []).map((r) => String(r).slice(0, 200)), verdict: result.verdict ?? null, infra: Boolean(result.infra) });
   // The gate has inspected the work branch; now put the human's branch back.
   result = { ...result, job_id: jobId, ...restoreBranch(finalJob) };
   writeJob(jobId, { ...finalJob, state: result.status, result, finishedAt: new Date().toISOString() });
+  trace({ type: "job_end", state: result.status, elapsed_ms: Date.now() - Date.parse(finalJob.startedAt), turns: res?.turns ?? null });
   progress.delete(jobId);
   appendRunLog({
     job: jobId,
@@ -382,6 +388,7 @@ server.tool(
       .catch((e) => {
         log(`job ${jobId} crashed: ${(e as Error).message}`);
         const j = readJob(jobId);
+        if (j && j.state === "running") traceSink(jobId)({ type: "job_end", state: "failed", elapsed_ms: Date.now() - Date.parse(j.startedAt), turns: null, crashed: true });
         if (j && j.state === "running") writeJob(jobId, { ...j, state: "failed", result: { status: "failed", infra: true, reasons: [`server error: ${(e as Error).message}`], ...restoreBranch(j) }, finishedAt: new Date().toISOString() });
       })
       .finally(() => {

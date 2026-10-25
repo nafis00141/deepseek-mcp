@@ -11,7 +11,8 @@ import type { Config } from "./config.ts";
 import { SKIP_DIRS, detectRepoEol, git, rel, runCmd, resolveInRepo, toPosix } from "./repo.ts";
 import { isDeniedRead, isDeniedWrite, matchAny, scopeFor } from "./taskfile.ts";
 import type { Task } from "./taskfile.ts";
-import type { AgentOutput, Caps, Repair, RoleName, RoleSpec, Usage } from "./types.ts";
+import { classifyDenied, summarizeArgs, summarizeResult } from "./trace.ts";
+import type { AgentOutput, Caps, Repair, RoleName, RoleSpec, TraceSink, Usage } from "./types.ts";
 
 /* ---------------------------------------------------------------- wire types */
 
@@ -32,7 +33,13 @@ export interface ChatMessage {
 
 interface ChatResponse {
   choices?: { message?: ChatMessage; finish_reason?: string }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number; [key: string]: unknown };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_cache_hit_tokens?: number;
+    completion_tokens_details?: { reasoning_tokens?: number };
+    [key: string]: unknown;
+  };
 }
 
 export interface ToolSchema {
@@ -374,7 +381,7 @@ export function requestBody(messages: ChatMessage[], tools: ToolSchema[], cfg: R
   return body;
 }
 
-async function chat(messages: ChatMessage[], tools: ToolSchema[], signal?: AbortSignal): Promise<ChatResponse> {
+async function chat(messages: ChatMessage[], tools: ToolSchema[], signal?: AbortSignal, trace?: TraceSink): Promise<ChatResponse> {
   const body = requestBody(messages, tools);
   const headers: Record<string, string> = { "content-type": "application/json", authorization: `Bearer ${CFG.key}` };
   const payload = JSON.stringify(body);
@@ -385,14 +392,16 @@ async function chat(messages: ChatMessage[], tools: ToolSchema[], signal?: Abort
     try {
       const res = await post(`${CFG.baseUrl}/chat/completions`, headers, payload, CFG.requestTimeoutMs, signal);
       if (res.status < 200 || res.status >= 300) {
-        const err: Error & { retryable?: boolean } = new Error(`DeepSeek HTTP ${res.status}: ${res.text.slice(0, 500)}`);
+        const err: Error & { retryable?: boolean; status?: number } = new Error(`DeepSeek HTTP ${res.status}: ${res.text.slice(0, 500)}`);
         err.retryable = res.status === 429 || res.status >= 500;
+        err.status = res.status;
         throw err;
       }
       return JSON.parse(res.text) as ChatResponse;
     } catch (e) {
       const retryable = !signal?.aborted && (e as { retryable?: boolean }).retryable !== false && !(e instanceof SyntaxError);
       if (attempt >= attempts || !retryable) throw e;
+      trace?.({ type: "api_retry", attempt, status: (e as { status?: number }).status ?? null, error: (e as Error).message.slice(0, 160) });
       await sleep(2000 * 2 ** (attempt - 1)); // 2s, 4s, 8s
     }
   }
@@ -423,13 +432,14 @@ export async function ping(): Promise<{ reply: string; usage: ChatResponse["usag
  * { why, message }: the message goes back to the model as a new user turn - at most
  * CFG.maxRepairs times - so cheap self-checks happen here rather than as a round trip to Claude.
  */
-export async function runAgent({ prompt, caps, logPath, onProgress, signal, verify }: {
+export async function runAgent({ prompt, caps, logPath, onProgress, signal, verify, trace }: {
   prompt: string;
   caps: Caps;
   logPath: string;
   onProgress?: (message: string) => void;
   signal?: AbortSignal;
   verify?: ((text: string) => Promise<VerifyProblem | null>) | null;
+  trace?: TraceSink;
 }): Promise<AgentOutput> {
   const tools = availableTools(caps);
   const messages: ChatMessage[] = [
@@ -450,16 +460,31 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
   while (turns < CFG.maxTurns) {
     if (signal?.aborted) return { finalText: "", turns, usage, exhausted: false, aborted: true, repairs };
     turns++;
-    const data = await chat(compact(messages), tools, signal);
+    const t0 = Date.now();
+    const data = await chat(compact(messages), tools, signal, trace);
     const msg = data.choices?.[0]?.message;
     if (!msg) throw new Error("empty response from model");
-    usage.input += data.usage?.prompt_tokens ?? 0;
-    usage.output += data.usage?.completion_tokens ?? 0;
+    const u = data.usage;
+    usage.input += u?.prompt_tokens ?? 0;
+    usage.output += u?.completion_tokens ?? 0;
+    const reasoning = u?.completion_tokens_details?.reasoning_tokens;
+    if (typeof reasoning === "number") usage.reasoning = (usage.reasoning ?? 0) + reasoning;
+    const cacheHit = u?.prompt_cache_hit_tokens;
+    if (typeof cacheHit === "number") usage.cacheHit = (usage.cacheHit ?? 0) + cacheHit;
     messages.push(msg);
 
     const calls = msg.tool_calls || [];
-    if (calls.length && data.choices?.[0]?.finish_reason === "length") {
+    const finish = data.choices?.[0]?.finish_reason ?? null;
+    trace?.({
+      type: "turn", n: turns, ms: Date.now() - t0, finish_reason: finish,
+      prompt_tokens: u?.prompt_tokens ?? null, completion_tokens: u?.completion_tokens ?? null,
+      reasoning_tokens: typeof reasoning === "number" ? reasoning : null, cache_hit_tokens: typeof cacheHit === "number" ? cacheHit : null,
+      tool_calls: calls.length, content_chars: String(msg.content ?? "").length,
+    });
+    if (!calls.length && finish === "length") trace?.({ type: "truncated", turn: turns, kind: "final" });
+    if (calls.length && finish === "length") {
       // The reply hit max_tokens mid tool call, so the arguments are cut off: do not run them.
+      trace?.({ type: "truncated", turn: turns, kind: "tool_call" });
       logLine(`turn ${turns}: reply truncated at max_tokens mid tool call`);
       for (const call of calls) messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "your reply was cut off before this call was complete, so it was not run; repeat it with less text in one call" }) });
       continue;
@@ -470,6 +495,7 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
         const problem = await verify(msg.content || "");
         if (problem) {
           repairs.push({ turn: turns, why: String(problem.why).replace(/\s+/g, " ").slice(0, 160) });
+          trace?.({ type: "repair", n: repairs.length, turn: turns, why: repairs[repairs.length - 1]!.why });
           logLine(`repair ${repairs.length}: ${problem.why}`.slice(0, 300));
           onProgress?.(`repair ${repairs.length}: ${problem.why}`.slice(0, 140));
           messages.push({ role: "user", content: problem.message });
@@ -487,7 +513,9 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
       } catch {
         args = {};
       }
+      const tt = Date.now();
       const out = await executeTool(name, args, caps);
+      trace?.({ type: "tool", turn: turns, name, args: summarizeArgs(name, args), ok: !out?.error, ...(out?.error ? { error: String(out.error).slice(0, 200) } : {}), result: summarizeResult(out), denied: classifyDenied(name, out?.error), ms: Date.now() - tt });
       const preview = out?.error ? `ERROR ${out.error}` : JSON.stringify(out).slice(0, 160);
       logLine(`tool ${name} ${JSON.stringify(args).slice(0, 120)} -> ${preview}`);
       onProgress?.(`${name}: ${out?.error ? out.error : preview.slice(0, 120)}`);

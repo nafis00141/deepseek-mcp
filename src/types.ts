@@ -34,10 +34,26 @@ export interface PromptCtx {
   pack?: string | undefined;
 }
 
+/** `reasoning` is a subset of `output` (not additional); absent when the API never reported it. */
 export interface Usage {
   input: number;
   output: number;
+  reasoning?: number;
+  cacheHit?: number;
 }
+
+/** One line of a job's trace.jsonl (the writer adds `ts`). */
+export type TraceEvent =
+  | { type: "job_start"; role: string; model: string; effort: string | null; thinking: string; prompt_chars: number; pack_chars: number; target: string }
+  | { type: "turn"; n: number; ms: number; finish_reason: string | null; prompt_tokens: number | null; completion_tokens: number | null; reasoning_tokens: number | null; cache_hit_tokens: number | null; tool_calls: number; content_chars: number }
+  | { type: "tool"; turn: number; name: string; args: Record<string, unknown>; ok: boolean; error?: string; result: string; denied: "write" | "read" | false; ms: number }
+  | { type: "repair"; n: number; turn: number; why: string }
+  | { type: "truncated"; turn: number; kind: "tool_call" | "final" }
+  | { type: "api_retry"; attempt: number; status: number | null; error: string }
+  | { type: "gate"; status: string; reasons: string[]; verdict: string | null; infra: boolean }
+  | { type: "job_end"; state: string; elapsed_ms: number; turns: number | null; crashed?: boolean };
+
+export type TraceSink = (event: TraceEvent) => void;
 
 export interface Repair {
   turn: number;

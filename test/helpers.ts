@@ -22,6 +22,9 @@ export interface Scripted {
   message?: ChatMessage;
   status?: number;
   finish_reason?: string;
+  /** Replaces the default usage block (prompt 10 / completion 5). */
+  usage?: Record<string, unknown>;
+  delayMs?: number;
 }
 export interface SeenBody {
   messages?: ChatMessage[];
@@ -42,13 +45,15 @@ const mock = http.createServer((req, res) => {
       /* not json */
     }
     const next = script.shift() ?? { message: { role: "assistant", content: "(script exhausted)" } };
-    if (next.status) {
-      res.writeHead(next.status);
-      res.end("mock error");
-      return;
-    }
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ choices: [{ message: next.message, finish_reason: next.finish_reason ?? "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    setTimeout(() => {
+      if (next.status) {
+        res.writeHead(next.status);
+        res.end("mock error");
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: next.message, finish_reason: next.finish_reason ?? "stop" }], usage: next.usage ?? { prompt_tokens: 10, completion_tokens: 5 } }));
+    }, next.delayMs ?? 0);
   });
 });
 await new Promise<void>((r) => mock.listen(0, "127.0.0.1", () => r()));
