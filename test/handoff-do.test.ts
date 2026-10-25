@@ -24,6 +24,8 @@ const script: Reply[] = [];
 let modelCalls = 0;
 const DONE = '```json\n{"status":"done","did":["changed it"],"not_done":[],"notes":""}\n```';
 const say = (content: string): Reply => ({ message: { role: "assistant", content }, finish_reason: "stop" });
+/** A scripted reply that the stand-in model sends only after `ms`, so a job stays running long enough to be interrupted by another call. */
+const slow = (ms: number, reply: Reply): Reply => ({ ...reply, delay: ms });
 const call = (name: string, args: unknown): Reply => ({ message: { role: "assistant", content: null, tool_calls: [{ id: `c${Math.random().toString(36).slice(2, 8)}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" });
 
 let stubServer: http.Server;
@@ -44,9 +46,11 @@ before(async () => {
     req.resume();
     req.on("end", () => {
       modelCalls++;
-      const next = script.shift() ?? say(`All done.\n${DONE}`);
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ choices: [next], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+      const { delay, ...next } = (script.shift() ?? say(`All done.\n${DONE}`)) as Reply & { delay?: number };
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [next], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+      }, delay ?? 0);
     });
   });
   await new Promise<void>((r) => stubServer.listen(0, "127.0.0.1", () => r()));
@@ -245,6 +249,48 @@ describe("handoff role=do over the real server", () => {
     assert.equal(r.branch, fixBranch, "one branch per task: the test job continues the fix branch");
     assert.equal(r.started_from, fixBranch);
     assert.deepEqual(r.files, ["tests/lib.extra.test.js"]);
+  });
+
+  it("safety: a fix started from a branch is held to its task's scope like any other job", async () => {
+    git("checkout", "-q", "main");
+    script.length = 0;
+    // a fresh server-made branch (no history), so this is an external start; task 02 allows only src/**
+    git("checkout", "-q", "-b", "impl/for-escape", "main");
+    write("src/lib/esc.js", "module.exports = 3;\n");
+    git("add", "src/lib/esc.js");
+    git("commit", "-qm", "task-07: impl");
+    git("checkout", "-q", "main");
+    script.push(call("write_file", { path: "tests/lib.test.js", content: "// weakened by the fix\n" }), call("write_file", { path: "package.json", content: "{}" }), call("write_file", { path: "src/lib/esc.js", content: "module.exports = 4;\n" }), say(`Done.\n${DONE}`));
+    const r = await handoff({ role: "fix", target: "specs/f/tasks/02-y.md", feedback_path: "specs/review/r.md", branch: "impl/for-escape", instruction: "bump it" });
+    assert.equal(r.status, "done", JSON.stringify(r.reasons ?? r.reason));
+    assert.deepEqual(r.files, ["src/lib/esc.js"]);
+    assert.equal(trace(String(r.job_id)).filter((e) => e.type === "tool" && e.denied === "write").length, 2);
+    assert.equal(git("show", `${String(r.branch)}:tests/lib.test.js`).includes("weakened"), false);
+  });
+
+  it("safety: one writer at a time holds for the new roles, and a read-only ask may overlap", async () => {
+    script.length = 0;
+    script.push(slow(2500, say(`Slow one.\n${DONE}`)));
+    const first = await client.call("handoff", { ...DO, instruction: "a slow job", paths: ["src/lib/**", "tests/**"], wait: false });
+    assert.equal(first.status, "running");
+    const second = await client.call("handoff", { ...DO, instruction: "a second writer", paths: ["src/lib/**", "tests/**"] });
+    assert.equal(second.status, "blocked");
+    assert.match(String(second.reason), /is still running/);
+    const research = await client.call("handoff", { role: "research", target: "specs/topic", instruction: "what is parse?" });
+    assert.equal(research.status, "blocked", "a doc role is a writer too");
+    const fix = await client.call("handoff", { role: "fix", target: "specs/f/tasks/02-y.md", feedback_path: "specs/review/r.md", branch: "impl/for-escape" });
+    assert.equal(fix.status, "blocked");
+    const ask = await client.call("handoff", { role: "ask", target: "src", instruction: "what is in src/lib?", wait: false });
+    assert.equal(ask.status, "running", "a read-only ask is allowed alongside a writer");
+    for (let i = 0; i < 30; i++) {
+      const s = await client.call("job_status", { job_id: first.job_id, wait_s: 10 });
+      if (s.status !== "running") {
+        assert.equal(s.status, "noop", "the slow job changed nothing and its tests pass");
+        break;
+      }
+    }
+    for (let i = 0; i < 30; i++) if ((await client.call("job_status", { job_id: ask.job_id, wait_s: 10 })).status !== "running") break;
+    git("checkout", "-q", "main");
   });
 
   it("the key ignores the order of paths: the same set in another order is still the same call", async () => {
