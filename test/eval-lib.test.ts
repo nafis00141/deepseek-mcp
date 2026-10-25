@@ -7,7 +7,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { CFG } from "../src/config.ts";
 import { runChecks } from "../eval/lib/checks.ts";
-import { loadTasks, makeRepo, removeDir } from "../eval/lib/fixture.ts";
+import { loadTasks, makeRepo, removeDir, taskRoots } from "../eval/lib/fixture.ts";
 import { allowlistEnv } from "../eval/lib/proc.ts";
 import { McpClient } from "../eval/lib/mcp.ts";
 import { privateLabel } from "../eval/lib/privacy.ts";
@@ -151,6 +151,26 @@ describe("fixture repo", () => {
       fx.remove();
     }
     assert.ok(!fs.existsSync(fx.tmp));
+  });
+
+  it("task folders: each private split has its own root; only the requested splits are opened; a task in the wrong folder is refused", () => {
+    const evalDir = path.join(scratch, "eval-folders");
+    const def = (id: string, split: string) => JSON.stringify({ id, family: "x", split, title: id, steps: [], checks: [], expect: { gate: "done" } });
+    put(evalDir, "tasks/d1/task.json", def("d1", "dev"));
+    put(evalDir, "heldout/h1/task.json", def("h1", "heldout"));
+    put(evalDir, "confirm/c1/task.json", def("c1", "confirm"));
+    put(evalDir, "reserve/r1/task.json", def("r1", "reserve"));
+    const roots = taskRoots(evalDir);
+    assert.deepEqual(roots.map((r) => path.basename(r)), ["tasks", "heldout", "confirm", "reserve"]);
+    assert.deepEqual(loadTasks(roots, ["dev"]).map((t) => t.id), ["d1"]);
+    assert.deepEqual(loadTasks(roots, ["dev", "heldout"]).map((t) => t.id), ["d1", "h1"]);
+    assert.deepEqual(loadTasks(roots, ["confirm"]).map((t) => t.id), ["c1"]);
+    assert.deepEqual(loadTasks(roots, ["reserve"]).map((t) => t.id), ["r1"]);
+    put(evalDir, "tasks/leaked/task.json", def("leaked", "confirm")); // a private task left in the public folder
+    assert.throws(() => loadTasks(roots, ["dev"]), /does not match the folder "tasks"/);
+    fs.rmSync(path.join(evalDir, "tasks", "leaked"), { recursive: true });
+    put(evalDir, "heldout/wrong/task.json", def("wrong", "dev")); // a dev task hidden in the held-out folder
+    assert.throws(() => loadTasks(roots, ["dev"]), /does not match the folder "heldout"/);
   });
 
   it("loads tasks, filtering by split", () => {

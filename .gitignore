@@ -5,4 +5,6 @@ specs/.jobs/
 specs/review/
 runs/
 eval/heldout/
+eval/confirm/
+eval/reserve/
 eval/.env

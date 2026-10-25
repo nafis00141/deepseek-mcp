@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadTasks } from "./lib/fixture.ts";
+import { loadTasks, taskRoots } from "./lib/fixture.ts";
 import { isPrivate } from "./lib/privacy.ts";
 
 export interface Forbidden {
@@ -78,7 +78,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.exit(1);
   }
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const hits = lintPatch(fs.readFileSync(file, "utf8"), forbiddenTerms(["tasks", "heldout", "confirm", "reserve"].map((d) => path.join(here, d))));
+  const hits = lintPatch(fs.readFileSync(file, "utf8"), forbiddenTerms(taskRoots(here)));
   if (hits.length) {
     for (const h of hits.slice(0, 20)) console.error(`line ${h.line}: mentions a ${h.kind}: ${h.term}`);
     console.error("rejected: a harness patch must be general, not tied to an eval task");

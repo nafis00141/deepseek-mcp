@@ -7,16 +7,28 @@ import type { LoadedTask, Split, TaskDef } from "./types.ts";
 
 export const sleepSync = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/** Read every <dir>/<id>/task.json under the given roots. Held-out tasks are only read when `splits` includes "heldout". */
+/** The split a task folder must declare, by the name of the folder that holds it. */
+const FOLDER_SPLIT: Record<string, Split> = { tasks: "dev", heldout: "heldout", confirm: "confirm", reserve: "reserve" };
+
+/** Every task folder root next to eval/run.ts: dev tasks plus the three private ones (the latter are gitignored and may be absent). */
+export const taskRoots = (evalDir: string): string[] => Object.keys(FOLDER_SPLIT).map((d) => path.join(evalDir, d));
+
+/**
+ * Read every <dir>/<id>/task.json under the given roots, keeping only the requested splits, so a run that asks for dev tasks
+ * never opens a private task. A task whose `split` disagrees with the folder it sits in is refused: a private task left in
+ * `tasks/` would be listed by name, and a dev task in `heldout/` would be hidden from the dev report.
+ */
 export function loadTasks(roots: string[], splits: Split[]): LoadedTask[] {
   const out: LoadedTask[] = [];
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
+    const mustBe = FOLDER_SPLIT[path.basename(root)];
     for (const e of fs.readdirSync(root, { withFileTypes: true })) {
       const file = path.join(root, e.name, "task.json");
       if (!e.isDirectory() || !fs.existsSync(file)) continue;
       const def = JSON.parse(fs.readFileSync(file, "utf8")) as TaskDef;
       if (def.id !== e.name) throw new Error(`${file}: id "${def.id}" must equal the folder name "${e.name}"`);
+      if (mustBe && def.split !== mustBe) throw new Error(`${file}: split "${def.split}" does not match the folder "${path.basename(root)}" (expected "${mustBe}")`);
       if (!splits.includes(def.split)) continue;
       out.push({ ...def, dir: path.join(root, e.name) });
     }

@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { CFG } from "../src/config.ts";
 import { runChecks } from "./lib/checks.ts";
-import { loadTasks, makeRepo, removeDir, runSetup } from "./lib/fixture.ts";
+import { loadTasks, makeRepo, removeDir, runSetup, taskRoots } from "./lib/fixture.ts";
 import { McpClient } from "./lib/mcp.ts";
 import { SERVER_SETTINGS, allowlistEnv } from "./lib/proc.ts";
 import { isPrivate, labelOf, runSubdir } from "./lib/privacy.ts";
@@ -384,7 +384,7 @@ async function main(): Promise<void> {
   const runsDir = path.join(ROOT, "runs");
   const opts: EvalOpts = {
     rootDir: ROOT,
-    tasksRoots: [path.join(HERE, "tasks"), path.join(HERE, "heldout")],
+    tasksRoots: taskRoots(HERE), // all four; `--split` decides which are opened (confirm and reserve are never selectable here)
     runsDir,
     runId: typeof a["run-id"] === "string" ? a["run-id"] : `${new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "")}-${crypto.randomBytes(2).toString("hex")}`,
     ...(typeof a.only === "string" ? { only: a.only.split(",").map((s) => s.trim()).filter(Boolean) } : {}),
