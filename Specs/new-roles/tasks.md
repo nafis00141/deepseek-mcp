@@ -68,3 +68,17 @@ Order matters as marked. "Done when" is checkable. Spec ids are AC-n in `spec.md
 - Goal: run the six tasks at k=5 on the candidate arm (a baseline without the roles cannot run them); record pass rates; triage failures through the reviewer bundle. Ask the owner before spending.
 - Done when: results recorded in `Specs/new-roles/`. (AC-15)
 - Depends on: T11.
+
+## Measured pass rates (T12)
+
+Hidden-check pass, k=5, DeepSeek, dev split.
+
+| task | roles-1 (before fixes) | roles-2 (after fixes) |
+|---|---|---|
+| do-scope-trap | 1/5 | 5/5 |
+| research-not-found | 4/5 | 5/5 (first try 1/5; one in-job citation repair each) |
+| free-form-refactor | 5/5 | 5/5 |
+| research-report | 5/5 | 5/5 |
+| fix-after-finding, fix-refuses-handmade-branch | 5/5 | not rerun |
+
+Fixes: `do` prompt splits whole-task SPEC_GAP from the partial path; research citations are repaired inside the job. No false accepts or rejects. Runs: `runs/roles-1`, `runs/roles-2`.
