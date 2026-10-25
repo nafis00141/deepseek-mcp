@@ -1,0 +1,38 @@
+{
+  "id": "late-fee-grace-and-cap-in-large-repo",
+  "family": "code",
+  "split": "dev",
+  "title": "late fees get a grace period and a cap",
+  "tier": "hard",
+  "axis": "long-context",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/billing/tasks/01-late-fee-rules.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/late-fee.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/late-fee.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}
