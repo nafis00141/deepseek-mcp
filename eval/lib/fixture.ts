@@ -20,6 +20,7 @@ export const taskRoots = (evalDir: string): string[] => Object.keys(FOLDER_SPLIT
  */
 export function loadTasks(roots: string[], splits: Split[]): LoadedTask[] {
   const out: LoadedTask[] = [];
+  const seen = new Map<string, string>();
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
     const mustBe = FOLDER_SPLIT[path.basename(root)];
@@ -28,6 +29,10 @@ export function loadTasks(roots: string[], splits: Split[]): LoadedTask[] {
       if (!e.isDirectory() || !fs.existsSync(file)) continue;
       const def = JSON.parse(fs.readFileSync(file, "utf8")) as TaskDef;
       if (def.id !== e.name) throw new Error(`${file}: id "${def.id}" must equal the folder name "${e.name}"`);
+      // An id shared by two folders (say a reserve task and a dev task) would make the public name stand for a private task in every report and audit.
+      const prior = seen.get(def.id);
+      if (prior) throw new Error(`task id "${def.id}" is used twice: ${prior} and ${file}`);
+      seen.set(def.id, file);
       if (mustBe && def.split !== mustBe) throw new Error(`${file}: split "${def.split}" does not match the folder "${path.basename(root)}" (expected "${mustBe}")`);
       if (!splits.includes(def.split)) continue;
       out.push({ ...def, dir: path.join(root, e.name) });

@@ -47,7 +47,8 @@ describe("rotation refusals", () => {
     const c = world({ clashWithDev: true });
     assert.throws(() => rotate(opts(c)), /would collide after the move/);
     for (const w of [a, b, c]) {
-      assert.deepEqual(loadTasks(taskRoots(w.evalDir), ["heldout"]).map((t) => t.id), ["held-1", "held-2", "held-3"]);
+      // only the held-out folder is read here: with a clash, loading every folder at once is (rightly) refused
+      assert.deepEqual(loadTasks([path.join(w.evalDir, "heldout")], ["heldout"]).map((t) => t.id), ["held-1", "held-2", "held-3"]);
       assert.equal(fs.existsSync(path.join(w.runsDir, "rotation-log.json")), false);
     }
     assert.equal(readLooks(path.join(a.runsDir, "heldout-looks.json")).total, 5, "counters untouched");

@@ -87,6 +87,15 @@ describe("audit", () => {
     assert.equal(audit(dir, terms, allow).hits.length, 2, "a changed file is audited again");
   });
 
+  it("ignores eight-word runs that a public task instruction also contains: found in a public file they prove nothing", () => {
+    put("eval2/tasks/pub-q/task.json", def("pub-q", "dev", "tell me which file defines the default timeout and cite the line"));
+    put("eval2/confirm/zz-conf-q/task.json", def("zz-conf-q", "confirm", "tell me which file defines the default timeout and also the retry limit in the amber registry"));
+    const t2 = privateTerms(path.join(root, "eval2"));
+    const dir = runs({ "run-e/prompt.txt": "Please tell me which file defines the default timeout for this client.", "run-e/leak.txt": "and also the retry limit in the amber registry" });
+    const hits = audit(dir, t2).hits;
+    assert.deepEqual(hits.map((h) => h.file), ["run-e/leak.txt"], "the shared opening is ignored; the private-only wording is still caught");
+  });
+
   it("builds terms from every private split and from no public task", () => {
     const ids = terms.filter((t) => t.kind === "task id").map((t) => t.term).sort();
     assert.deepEqual(ids, ["zz-conf-beta", "zz-held-alpha", "zz-res-gamma"]);

@@ -37,6 +37,8 @@ interface Term {
   label: string;
 }
 
+/** Words in a run of instruction text that counts as evidence of a leak: short runs of ordinary English occur in model output by chance. */
+const RUN = 8;
 const GENERIC = new Set(["package.json", "readme.md", ".gitignore", "src/index.js"]);
 const words = (s: string): string[] => s.toLowerCase().replace(/[^a-z0-9_./-]+/g, " ").split(" ").filter(Boolean);
 
@@ -45,11 +47,24 @@ function listFiles(dir: string, base = dir): string[] {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? listFiles(path.join(dir, e.name), base) : [path.relative(base, path.join(dir, e.name)).replace(/\\/g, "/")]));
 }
 
-/** What identifies a private task: its id, six-word runs of its instructions, and fixture paths no public task also has. */
+/** What identifies a private task: its id, eight-word runs of its instructions, and fixture paths no public task also has. */
 export function privateTerms(evalDir: string): Term[] {
   const all = loadTasks(taskRoots(evalDir), ["dev", "heldout", "confirm", "reserve"]);
   const owners = new Map<string, Set<string>>();
   for (const t of all) for (const f of listFiles(path.join(t.dir, "repo"))) owners.set(f.toLowerCase(), (owners.get(f.toLowerCase()) ?? new Set()).add(isPrivate(t.split) ? "private" : "public"));
+  // An eight-word run that a public task's instruction or the role prompts also contain says nothing about a private task when found
+  // in a public file, so those runs are not forbidden: only wording unique to a private task counts as evidence of a leak.
+  const common = new Set<string>();
+  const addShingles = (text: string): void => {
+    const w = words(text);
+    for (let i = 0; i + RUN <= w.length; i++) common.add(w.slice(i, i + RUN).join(" "));
+  };
+  for (const t of all.filter((x) => !isPrivate(x.split))) for (const s of t.steps) addShingles(s.instruction ?? "");
+  try {
+    addShingles(fs.readFileSync(path.join(evalDir, "..", "src", "roles.ts"), "utf8"));
+  } catch {
+    /* no sources next to the eval folder (a synthetic one in a test) */
+  }
   const out: Term[] = [];
   for (const t of all.filter((x) => isPrivate(x.split))) {
     const label = privateLabel(t.id);
@@ -60,7 +75,10 @@ export function privateTerms(evalDir: string): Term[] {
     }
     for (const s of t.steps) {
       const w = words(s.instruction ?? "");
-      for (let i = 0; i + 6 <= w.length; i++) out.push({ term: w.slice(i, i + 6).join(" "), kind: "instruction text", label });
+      for (let i = 0; i + RUN <= w.length; i++) {
+        const run = w.slice(i, i + RUN).join(" ");
+        if (!common.has(run)) out.push({ term: run, kind: "instruction text", label });
+      }
     }
   }
   return out;

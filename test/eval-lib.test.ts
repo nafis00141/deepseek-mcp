@@ -173,6 +173,9 @@ describe("fixture repo", () => {
     fs.rmSync(path.join(evalDir, "tasks", "leaked"), { recursive: true });
     put(evalDir, "heldout/wrong/task.json", def("wrong", "dev")); // a dev task hidden in the held-out folder
     assert.throws(() => loadTasks(roots, ["dev"]), /does not match the folder "heldout"/);
+    fs.rmSync(path.join(evalDir, "heldout", "wrong"), { recursive: true });
+    put(evalDir, "reserve/d1/task.json", def("d1", "reserve")); // the same id as a dev task, in another folder
+    assert.throws(() => loadTasks(roots, ["dev"]), /task id "d1" is used twice/);
   });
 
   it("loads tasks, filtering by split", () => {
@@ -384,7 +387,7 @@ describe("task validation (--validate)", () => {
 
 describe("cli: private splits", () => {
   const runTs = path.join(REPO_DIR, "eval", "run.ts");
-  const cli = (...args: string[]) => spawnSync(process.execPath, [runTs, ...args], { encoding: "utf8", env: allowlistEnv() });
+  const cli = (...args: string[]) => spawnSync(process.execPath, [runTs, ...args], { encoding: "utf8", env: allowlistEnv({ GIT_BIN: CFG.git }) });
 
   it("confirm and reserve can be validated offline but never run or dry-run from the runner", () => {
     for (const split of ["confirm", "reserve"]) {
