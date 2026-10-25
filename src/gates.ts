@@ -280,7 +280,7 @@ async function codeGate(job: Job, res: ExecResult | null): Promise<JobResult> {
     if (res.gap) reasons.push(`model reported BLOCKED: ${res.gap}`);
     else if (res.summary?.status === "blocked") reasons.push("model reported status=blocked");
     if (!res.summary) reasons.push("final message had no parsable summary JSON");
-    if (res.exhausted) reasons.push(res.exhaustedReason === "input_tokens" ? `hit JOB_INPUT_TOKEN_CAP (${CFG.jobInputTokenCap} input tokens, ${res.usage?.input ?? "?"} used) without finishing` : `hit MAX_TURNS (${CFG.maxTurns}) without finishing`);
+    if (res.exhausted) reasons.push(res.exhaustedReason === "input_tokens" ? `hit JOB_INPUT_TOKEN_CAP (${CFG.jobInputTokenCap} input tokens, ${res.usage?.input ?? "?"} used) without finishing` : res.exhaustedReason === "request_size" ? `next request would exceed MAX_REQUEST_BYTES (${CFG.maxRequestBytes} bytes); stopped without finishing` : `hit MAX_TURNS (${CFG.maxTurns}) without finishing`);
   }
   if (!scope.length) reasons.push(job.role === "test" ? "task has no test-path glob in allowed_paths" : "task has no allowed_paths");
   if (!task.testCommand) reasons.push("task declares no test_command");

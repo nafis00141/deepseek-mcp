@@ -1,6 +1,19 @@
 # Tasks: using the 1M-token context window
 
-Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.md` (v3).
+Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.md` (v4).
+
+## Status
+
+| task | state |
+|---|---|
+| T1 settings | done (889b749); `loadContextSettings` and `configProblem` instead of a `loadConfig(env)` function |
+| T4 caps | done (889b749) |
+| T5 guard and size check | done; size refusal ends as exhausted `request_size`; `context_budget` is added with T3 |
+| T7 runner, proxy, compare | done; `--upstream-timeout`, timeouts in the manifest, `task.env` refusal, `--dev-only` (SCREENING), `--axis`, `--exclude-axis`, `--tasks` |
+| T2, T3, T6, T8-T13 | not started |
+
+Tests: `test/context-settings.test.ts`, additions in `test/eval-lib.test.ts` and `test/eval-calibrate.test.ts`. Full suite 274 tests, none failing.
+
 
 ## T1. Settings with unchanged defaults
 - Goal: add a testable `loadConfig(env)` and `CONTEXT_MODE` (`legacy`|`extended`), `COMPACT_CHARS`, `COMPACT_LOW`, `CONTEXT_TOKENS`, `CONTEXT_WINDOW`, `READ_BUDGET_CHARS`, `READ_MAX_LINES`, `RESULT_LIMIT_CHARS`, `MAX_REQUEST_BYTES` (default 0), `JOB_INPUT_TOKEN_CAP` to `src/config.ts`; each setting has its own type and range (0 where it means off or already has a meaning; `COMPACT_LOW` a fraction in (0,1]).
@@ -14,9 +27,9 @@ Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.
 - Depends on: T1.
 
 ## T3. Token-aware, cache-friendly compaction modes
-- Goal: extended mode: token budget (last `prompt_tokens` plus an estimate for new messages, falling back to characters), fixed marker, cut messages tracked in a side `WeakSet`, consistent escaped-JSON sizes, watermark cut-down, then dropping old `reasoning_content`, then ending the job as exhausted ("context budget") if the budget is still unreachable.
+- Goal: extended mode: token budget (last `prompt_tokens` plus an estimate for new messages, falling back to characters), fixed marker, cut messages tracked in a side `WeakSet`, consistent escaped-JSON sizes, watermark cut-down, then ending the job as exhausted with reason `context_budget` if the budget is still unreachable (never dropping `reasoning_content`: the API answers 400 without it in a tool loop). Add `context_budget` to `exhaustedReason`, the gate text and `engine.ts`.
 - Files: `src/compact.ts`, `test/compact.test.ts`.
-- Done when: works with usage and without; no cut message is ever changed again and no marker field reaches the request body; on a synthetic 40-turn conversation the watermark gives at most half as many prefix-changing turns as no watermark; first two and last six messages untouched; the unreachable-budget path is tested. (AC-2, AC-3)
+- Done when: works with usage and without; no cut message is ever changed again and no marker field reaches the request body; on a synthetic 40-turn conversation the watermark gives at most half as many prefix-changing turns as no watermark; first two and last six messages untouched; the unreachable-budget path ends as `context_budget` and is tested. (AC-2, AC-3)
 - Depends on: T2.
 
 ## T4. Read and result caps from settings
@@ -31,7 +44,7 @@ Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.
 - Done when: a mock model requesting large reads ends with the cap reason and reaches the gates as exhausted with commit rules unchanged; cap off is unchanged; an oversize body is refused before sending. (AC-5, AC-10)
 - Depends on: T1.
 
-## T6. Trace and score metrics
+## T6. Trace and score metrics (needs T4 for the returned from/to; both done or in the same change)
 - Goal: `compact` trace event; peak prompt tokens, cache-hit share, compactions, overlap-based repeat reads, reasoning tokens, truncated events and timeouts in `score.ts`; columns in compare tables.
 - Files: `src/types.ts`, `src/trace.ts` (`summarizeResult` for `read_file`), `eval/score.ts`, `eval/compare.ts`, tests.
 - Done when: synthetic traces give the expected numbers (ordinary paging is not a repeat); a trace from before this change still scores. (AC-6)
@@ -50,7 +63,7 @@ Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.
 - Depends on: T7; `Specs/harder-evals/` T1 and T4.
 
 ## T9. XL tasks (T9a: three, T9b: three; separate sessions)
-- Goal: six hard dev tasks, axis `long-context-xl`, none solvable by one lexical `grep` (it skips lines of 2,000+ characters and files over 1 MB): needle in a very large file that needs reasoning; cross-file change in a repo larger than the old compaction limit; a long job whose early reads matter after the old limit; and three more variations. Hidden checks, a reference and two decoys of different kinds each; edits by reference and decoys stay in small files. Authored without looking at any run result. Also edit `Specs/harder-evals/spec.md` AC-13 to cover "seed plus generator" and exempt these tasks from its AC-10 structural retune.
+- Goal: six hard dev tasks, axis `long-context-xl`, none solvable by one lexical `grep` (it skips lines of 2,000+ characters and files over 1 MB): needle in a very large file that needs reasoning; cross-file change in a repo larger than the old compaction limit; a long job whose early reads matter after the old limit; and three more variations. Hidden checks, a reference and two decoys of different kinds each; edits by reference and decoys stay in small files. Authored without looking at any run result. Also amend `Specs/harder-evals/spec.md` AC-11, AC-12 and AC-14 so these tasks are outside the hard-tier counts and budgets, and edit `Specs/harder-evals/spec.md` AC-13 to cover "seed plus generator" and exempt these tasks from its AC-10 structural retune.
 - Done when: `--validate` passes for all six and total `--validate` time stays within its budget; each expands above the old compaction limit; committed folders stay small; the harder-evals spec is amended. (AC-7)
 - Depends on: T8. Must land before `Specs/harder-evals/` T17 or that freeze is redone.
 
@@ -61,7 +74,7 @@ Order matters where noted. "Done when" is checkable. Spec ids are AC-n in `spec.
 - Depends on: T3, T5, T9. Ask the owner before spending.
 
 ## T11. Experiment plan, estimate and pilot (needs approval)
-- Goal: write the four arms, the task list, k, identical timeouts and `JOB_INPUT_TOKEN_CAP`, the cost estimate from `eval/pricing.json` and the pilot results (k=1 on all arms, to catch broken scenarios and calibrate cost). Pre-register that arm (c) vs (a) decides. Ask the owner before the full run.
+- Goal: write the four arms (the top arm only if the pilot's peak prompt tokens are at least 1.5 times the primary's), the guard definition and its false-block rate, the job count, wall-clock and concurrency, the task list, k, identical timeouts and `JOB_INPUT_TOKEN_CAP`, the cost estimate from `eval/pricing.json` and the pilot results (k=1 on all arms, to catch broken scenarios and calibrate cost). Pre-register that arm (c) vs (a) decides. Ask the owner before the full run.
 - Files: `Specs/long-context/experiment.md`.
 - Done when: the negative control (baseline twice) is specified; the task list is fixed; the estimate (including retries and calibration of the XL tasks at defaults) is written; the owner has approved it. (AC-8, AC-9)
 - Depends on: T4, T6, T7, T9, T10.

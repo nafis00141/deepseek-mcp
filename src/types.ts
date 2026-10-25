@@ -83,7 +83,7 @@ export interface AgentOutput {
   usage: Usage;
   exhausted: boolean;
   /** why the loop stopped without a final answer; absent for a normal finish */
-  exhaustedReason?: "turns" | "input_tokens";
+  exhaustedReason?: "turns" | "input_tokens" | "request_size";
   aborted?: boolean;
   repairs: Repair[];
 }
@@ -97,7 +97,7 @@ export interface ExecResult {
   summary: Summary | null;
   gap: string | null;
   exhausted?: boolean;
-  exhaustedReason?: "turns" | "input_tokens";
+  exhaustedReason?: "turns" | "input_tokens" | "request_size";
   repairs?: Repair[];
   error?: string;
   aborted?: boolean;

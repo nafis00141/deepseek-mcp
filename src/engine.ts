@@ -382,13 +382,16 @@ export function requestBody(messages: ChatMessage[], tools: ToolSchema[], cfg: R
   return body;
 }
 
+/** The request would exceed MAX_REQUEST_BYTES; the job ends as exhausted (request_size) instead of failing as an infrastructure error. */
+export class RequestTooLarge extends Error {}
+
 async function chat(messages: ChatMessage[], tools: ToolSchema[], signal?: AbortSignal, trace?: TraceSink): Promise<ChatResponse> {
   const body = requestBody(messages, tools);
   const headers: Record<string, string> = { "content-type": "application/json", authorization: `Bearer ${CFG.key}` };
   const payload = JSON.stringify(body);
   if (CFG.maxRequestBytes > 0) {
     const bytes = Buffer.byteLength(payload);
-    if (bytes > CFG.maxRequestBytes) throw new Error(`request body is ${bytes} bytes, over MAX_REQUEST_BYTES (${CFG.maxRequestBytes}); not sent`);
+    if (bytes > CFG.maxRequestBytes) throw new RequestTooLarge(`request body is ${bytes} bytes, over MAX_REQUEST_BYTES (${CFG.maxRequestBytes}); not sent`);
   }
 
   const attempts = 4;
@@ -471,7 +474,15 @@ export async function runAgent({ prompt, caps, logPath, onProgress, signal, veri
     }
     turns++;
     const t0 = Date.now();
-    const data = await chat(compact(messages), tools, signal, trace);
+    let data: ChatResponse;
+    try {
+      data = await chat(compact(messages), tools, signal, trace);
+    } catch (e) {
+      // Scored as a failed job, not dropped as an infrastructure error: a size refusal is a property of the arm.
+      if (!(e instanceof RequestTooLarge)) throw e;
+      logLine(`turn ${turns}: ${e.message}`);
+      return { finalText: "", turns: turns - 1, usage, exhausted: true, exhaustedReason: "request_size", repairs };
+    }
     const msg = data.choices?.[0]?.message;
     if (!msg) throw new Error("empty response from model");
     const u = data.usage;

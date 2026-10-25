@@ -177,11 +177,19 @@ describe("job input-token guard and request size check", () => {
 
   it("refuses to send a request body over MAX_REQUEST_BYTES, and sends nothing", async () => {
     script.push(finalDone);
-    await withCfg({ maxRequestBytes: 1000 }, async () => {
-      await assert.rejects(runAgent({ prompt: "z".repeat(5000), caps: implCaps(), logPath: logPath() }), /over MAX_REQUEST_BYTES \(1000\); not sent/);
-    });
+    const refused = await withCfg({ maxRequestBytes: 1000 }, () => runAgent({ prompt: "z".repeat(5000), caps: implCaps(), logPath: logPath() }));
+    assert.deepEqual([refused.exhausted, refused.exhaustedReason, refused.turns], [true, "request_size", 0], "the job ends as exhausted, so it is scored as a failure and not dropped as infrastructure");
     assert.equal(bodies.length, 0);
     const ok = await runAgent({ prompt: "z".repeat(5000), caps: implCaps(), logPath: logPath() });
     assert.equal(ok.exhausted, false, "with the check off the same request is sent");
+    const gateOut = await withCfg({ maxRequestBytes: 1000 }, async () => {
+      sh("git", ["checkout", "-q", "-b", "do/abc12345-y"]);
+      const startedSha = gitOut("rev-parse", "HEAD");
+      const startedChanges = snapshot();
+      put("src/lib/b.js", "export const b = 1;\n");
+      commit(["src/lib/b.js"], "task-do: do");
+      return gate(mkJob({ role: "do", mode: "code", targetRel: "src/lib", branch: "do/abc12345-y", synthetic: true, allowedPaths: ["src/lib/**"], testCommand: "node --version", startedSha, startedChanges, commit: "x", commitError: null }), mkRes({ exhausted: true, exhaustedReason: "request_size" }));
+    });
+    assert.match((gateOut.reasons ?? []).join("|"), /next request would exceed MAX_REQUEST_BYTES \(1000 bytes\)/);
   });
 });
