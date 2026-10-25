@@ -558,6 +558,16 @@ describe("cli: private splits", () => {
     assert.match(cli("--split", "bogus").stderr, /--split must be dev, heldout, all, confirm or reserve/);
   });
 
+  it("--validate --quiet prints only failures and the summary line", () => {
+    const loud = cli("--validate", "--split", "dev", "--only", "ask-cite");
+    const quiet = cli("--validate", "--split", "dev", "--only", "ask-cite", "--quiet");
+    assert.equal(loud.status, 0, loud.stderr);
+    assert.match(loud.stdout, /^\s+ok\s+ask-cite \/ reference/m);
+    assert.equal(quiet.status, 0, quiet.stderr);
+    assert.doesNotMatch(quiet.stdout, /^\s+ok\s/m, "passing variants are not listed");
+    assert.match(quiet.stdout, /validated 1 task\(s\): \d+\/\d+ variant\(s\) ok/);
+  });
+
   it("a live run needs --arm and --purpose; validate and dry-run do not", () => {
     for (const args of [[], ["--arm", "baseline"], ["--purpose", "comparison"]]) {
       const r = cli("--split", "dev", "--yes", ...args);

@@ -486,7 +486,8 @@ async function main(): Promise<void> {
     gitBin: CFG.git,
     serverEnv: process.env,
     pricing,
-    log: (l) => console.log(l),
+    // --quiet (validation only): print failures and the summary, not one line per passing variant
+    log: a.quiet === true && a.validate === true ? (l) => { if (!/^\s+ok\s/.test(l)) console.log(l); } : (l) => console.log(l),
   };
   if (opts.resume && typeof a["run-id"] !== "string") throw new Error("--resume needs --run-id <existing run>");
   // A live run is the only thing that spends money and produces evidence, so it must say whose evidence it is. No default: a

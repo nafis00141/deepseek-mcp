@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck",
+    "check": "node scripts/check.ts",
     "test": "node --test \"test/*.test.ts\"",
     "smoke": "node scripts/smoke.ts",
     "eval": "node eval/run.ts",
