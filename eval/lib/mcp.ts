@@ -17,7 +17,8 @@ export class McpClient {
   stderr = "";
 
   constructor(script: string, env: NodeJS.ProcessEnv, cwd: string) {
-    this.child = spawn(process.execPath, [script], { env, cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    // detached on POSIX makes the server a process-group leader, so killTree can stop it and its test commands together.
+    this.child = spawn(process.execPath, [script], { env, cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: process.platform !== "win32" });
     this.child.stderr?.on("data", (d: Buffer) => {
       this.stderr += d;
       if (this.stderr.length > 200_000) this.stderr = this.stderr.slice(-100_000);
@@ -76,6 +77,10 @@ export class McpClient {
     } catch {
       return { status: "bad_reply", text: text.slice(0, 500) };
     }
+  }
+
+  get pid(): number | undefined {
+    return this.child.pid;
   }
 
   close(): void {

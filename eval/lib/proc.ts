@@ -23,9 +23,14 @@ export function killTree(child: ChildProcess): void {
   if (!child.pid || child.exitCode !== null) return;
   try {
     if (process.platform === "win32") spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-    else process.kill(-child.pid, "SIGKILL");
+    else process.kill(-child.pid, "SIGKILL"); // the whole group; needs a child started with `detached: true`
   } catch {
-    /* already gone */
+    // Not a group leader (or already gone): at least stop the child itself, or its pipes keep the parent alive.
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
   }
 }
 

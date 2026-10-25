@@ -9,6 +9,7 @@ import { CFG } from "../src/config.ts";
 import { runChecks } from "../eval/lib/checks.ts";
 import { loadTasks, makeRepo, removeDir } from "../eval/lib/fixture.ts";
 import { allowlistEnv } from "../eval/lib/proc.ts";
+import { McpClient } from "../eval/lib/mcp.ts";
 import { validateTasks } from "../eval/lib/validate.ts";
 import { costOf, startProxy } from "../eval/lib/proxy.ts";
 import type { Pricing, StepResult } from "../eval/lib/types.ts";
@@ -97,6 +98,27 @@ describe("proxy", () => {
     assert.equal(up.seen[0]?.body.max_tokens, 5);
     await proxy.close();
     await up.close();
+  });
+});
+
+describe("McpClient.close", () => {
+  it("really stops the child (a leaked server process keeps `node --test` from ever exiting, as on the Linux CI)", async () => {
+    const script = path.join(scratch, "sleeper.mjs");
+    fs.writeFileSync(script, "setInterval(() => {}, 1000);\n");
+    const client = new McpClient(script, allowlistEnv(), scratch);
+    const pid = client.pid!;
+    assert.ok(pid > 0);
+    client.close();
+    let alive = true;
+    for (let i = 0; i < 50 && alive; i++) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((r) => setTimeout(r, 100));
+      } catch {
+        alive = false;
+      }
+    }
+    assert.equal(alive, false, "the child process is gone within 5s");
   });
 });
 
