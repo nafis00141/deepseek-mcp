@@ -1,0 +1,52 @@
+{
+  "id": "registry-ids-shared-state",
+  "family": "code",
+  "split": "dev",
+  "title": "give registry entries ids and an unregister, without disturbing the existing tests",
+  "tier": "hard",
+  "axis": "order-dependent",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/registry/tasks/01-ids.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/registry.order.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    },
+    {
+      "type": "file_contains",
+      "name": "order-test-kept",
+      "path": "tests/registry.test.js",
+      "pattern": "\\['zeta', 'alpha'\\]"
+    },
+    {
+      "type": "file_pattern_count",
+      "name": "tests-added",
+      "path": "tests/registry.test.js",
+      "pattern": "^test\\(",
+      "flags": "gm",
+      "min": 5
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/registry.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

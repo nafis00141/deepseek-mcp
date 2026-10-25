@@ -1,0 +1,38 @@
+{
+  "id": "windows-path-helpers",
+  "family": "code",
+  "split": "dev",
+  "title": "Windows path helpers: same file, same folder, manifest files",
+  "tier": "hard",
+  "axis": "windows",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/winpaths/tasks/01-win-helpers.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/winpaths.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/winpaths.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

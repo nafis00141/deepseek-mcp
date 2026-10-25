@@ -1,0 +1,38 @@
+{
+  "id": "discount-rule-consolidation",
+  "family": "code",
+  "split": "dev",
+  "title": "move the discount-rule code that three modules copied into one shared module",
+  "tier": "hard",
+  "axis": "cross-file-refactor",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/discount/tasks/01-shared-discount.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/pricing.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/pricing.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}
