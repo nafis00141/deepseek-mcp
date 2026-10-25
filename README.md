@@ -176,6 +176,8 @@ node eval/run.ts --only ask-cite --k 1 --max-tokens 300000 --yes --allow-dirty  
 
 `node eval/score.ts <run-id>` scores a finished run offline (no API call) and writes `scores.json` and `report.md`: hidden-check pass rate, gate acceptance, false accepts and rejects, first-try passes, instruction compliance, repairs, turns, tokens, wall time and refused tool calls, with mean and spread over repeats. Held-out tasks show only as one aggregate; their details go to `heldout-private/`.
 
+Held-out, confirmation and reserve tasks are private: they appear in reports only as aggregates or as hashes, and `eval/audit.ts` proves nothing leaks. `eval/confirm.ts` takes the one final look at the confirmation set, `eval/rotate.ts` refreshes the held-out set when it is worn out, and `eval/compare.ts` measures its guard tolerance from baseline noise and keys its look budget by lineage. See `eval/loop.md`.
+
 The real key stays in the runner and a local proxy; the server under test gets a random bearer. Runs land in `runs/<id>/`. Held-out tasks live in `eval/heldout/` (gitignored).
 
 ## Branches and results

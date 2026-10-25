@@ -94,6 +94,43 @@ KEEP means "worth your review", nothing more. Read the diff, the comparison, and
 
 Then the new code is the baseline for the next candidate: go back to step 1.
 
+## Private splits, confirmation and rotation
+
+Three splits are **private**: `heldout` (the regression guard checked on every candidate), `confirm` (looked at once, for a final decision) and `reserve` (unseen tasks that refill held-out). Their folders are `eval/heldout/`, `eval/confirm/` and `eval/reserve/`, all gitignored. One rule (`eval/lib/privacy.ts`) decides what may be shown:
+
+- A private task appears in reports, scores, logs, manifests and bundles **only as a hash** (`p-1a2b3c4d`) or inside an aggregate row. Per-task rows and run details go to `private/<split>/` inside the run folder and to `private/scores.json` (runs written before this rule used `heldout-private/`; both are read).
+- A task whose `split` disagrees with the folder it sits in is refused by the loader, so a private task cannot sit in `tasks/` and be listed by name.
+- `compare.ts` counts only dev rows for gains and losses and only held-out rows for the guard; confirm and reserve rows belong to neither.
+- `patch-lint` forbids the ids, private-only fixture paths and instruction text of all three splits.
+
+**Confirmation.** Once, when you intend to act on a result:
+
+```powershell
+node eval/confirm.ts --candidate candidate-N --baseline baseline-M --final --yes
+```
+
+It runs the confirmation tasks on both arms from the **pinned server copies** of those two runs (so the working tree is irrelevant), at k=8 by default, and prints aggregate numbers only: hidden pass, false accepts, the mean per-task change, the paired exact test for improvement and the non-inferiority test (alpha 0.10, margin 0.10 unless `--margin` is given). It prints no task, check or per-task result. It refuses without `--final`, without `--yes`, when the estimated cost exceeds `--max-cost` (default $2.50, estimated from `runs/last-usage.json`, so run a pilot first), when the server code was already confirmed, when the candidate's lineage has already had its look, and after three looks in total since the last rotation. Every look is appended to `runs/confirm-log.jsonl` (lineage, both code hashes, aggregate result; no task names). A run that does not finish cleanly records no look.
+
+**Rotation.** When the held-out set has had 12 looks (the total in `runs/heldout-looks.json`), it no longer works as a guard:
+
+```powershell
+node eval/rotate.ts            # dry run: says what would move
+node eval/rotate.ts --yes      # promote held-out into dev, refill held-out from the reserve
+```
+
+It needs at least 8 reserve tasks, moves the folders and rewrites each `task.json` `split`, resets the look counters, writes a rotation marker into the confirm log and records a hashed-label entry in `runs/rotation-log.json`. One reserve of 8 allows one rotation. Promoted tasks join the dev tier and should be calibrated like any new dev task (`Specs/harder-evals/`).
+
+**Audit.**
+
+```powershell
+node eval/audit.ts             # exit 1 on any private id, instruction text or private-only fixture path outside private/
+node eval/audit.ts --write-allow   # record files that predate the privacy rule (path + content hash)
+```
+
+It scans everything under `runs/` except `private/`, `heldout-private/`, the pinned `server/` copies and `node_modules`, and reports hashed labels, never the term. The allowlist (`eval/audit-allow.json`, local and gitignored) tolerates a file only while its content hash matches, so a changed file is audited again. Run it before sharing any run folder or bundle.
+
+**Authoring confirm and reserve tasks.** Write them in a fresh agent session that is given only the list of task families, the check helpers (`eval/lib/checks.ts`) and the authoring rules in the next section, never any run result. Set `author` and `authored_on` in `task.json`, validate with `node eval/run.ts --validate --split confirm` (see the note under Adding a task), and do not look at how the arms score on them.
+
 ## Adding a task
 
 If a failure class has no task, add one under `eval/tasks/<id>/` with hidden checks, a reference and a decoy, and make `node eval/run.ts --validate` pass. A task written after seeing a result is allowed but must be disclosed as such, and cannot be the only evidence for a KEEP.

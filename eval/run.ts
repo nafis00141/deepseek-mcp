@@ -42,6 +42,8 @@ export interface EvalOpts {
   /** Which side of a comparison this run is, and what it is for; recorded in the manifest (required by the harder-evals spec later). */
   arm?: "baseline" | "candidate" | undefined;
   purpose?: "calibration" | "comparison" | undefined;
+  /** Use this directory's src/ and package.json as the code under test (a previous run's `server/` folder) instead of the working tree. */
+  serverSrc?: string | undefined;
   taskTimeoutS: number;
   resume: boolean;
   allowDirty: boolean;
@@ -181,15 +183,17 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
   if (!o.yes) throw new Error("live runs spend money: re-run with --yes after reading the plan above");
   if (!tasks.length) throw new Error("no tasks selected");
 
-  const dirty = spawnSync(o.gitBin, ["status", "--porcelain"], { cwd: o.rootDir, encoding: "utf8" }).stdout.trim();
+  // With `serverSrc` the code under test is an existing run's pinned copy, so the working tree's state does not matter.
+  const dirty = o.serverSrc ? "" : spawnSync(o.gitBin, ["status", "--porcelain"], { cwd: o.rootDir, encoding: "utf8" }).stdout.trim();
   if (dirty && !o.allowDirty) throw new Error(`working tree has uncommitted changes (pass --allow-dirty to run them; the server code hash is recorded):\n${dirty.split("\n").slice(0, 8).join("\n")}`);
 
   // Pin the server code: every run uses this copy, so edits or branch switches mid-run change nothing.
   fs.mkdirSync(runDir, { recursive: true });
   const serverDir = path.join(runDir, "server");
   if (!fs.existsSync(serverDir)) {
-    fs.cpSync(path.join(o.rootDir, "src"), path.join(serverDir, "src"), { recursive: true });
-    fs.copyFileSync(path.join(o.rootDir, "package.json"), path.join(serverDir, "package.json"));
+    const from = o.serverSrc ?? o.rootDir;
+    fs.cpSync(path.join(from, "src"), path.join(serverDir, "src"), { recursive: true });
+    fs.copyFileSync(path.join(from, "package.json"), path.join(serverDir, "package.json"));
   }
   // Dependencies are shared, not copied: a junction needs no admin rights on Windows and works wherever runs/ lives.
   const deps = path.join(o.rootDir, "node_modules");
@@ -395,7 +399,9 @@ async function main(): Promise<void> {
   const a = parseArgs(process.argv.slice(2));
   const num = (v: string | true | undefined): number | undefined => (typeof v === "string" && Number.isFinite(Number(v)) ? Number(v) : undefined);
   const splitArg = typeof a.split === "string" ? a.split : "dev";
-  if (!["dev", "heldout", "all"].includes(splitArg)) throw new Error(`--split must be dev, heldout or all`);
+  if (!["dev", "heldout", "all", "confirm", "reserve"].includes(splitArg)) throw new Error(`--split must be dev, heldout, all, confirm or reserve`);
+  // Confirm and reserve tasks are never run or scored from here (confirm.ts takes the one look); --validate is offline and only checks their fixtures.
+  if ((splitArg === "confirm" || splitArg === "reserve") && a.validate !== true) throw new Error(`--split ${splitArg} is only for --validate: confirmation tasks are run by eval/confirm.ts, and reserve tasks are never run until promoted`);
   let pricing: Pricing | undefined;
   try {
     pricing = JSON.parse(fs.readFileSync(path.join(HERE, "pricing.json"), "utf8")) as Pricing;

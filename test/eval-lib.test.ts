@@ -4,6 +4,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { CFG } from "../src/config.ts";
 import { runChecks } from "../eval/lib/checks.ts";
@@ -17,6 +18,7 @@ import type { Pricing, StepResult } from "../eval/lib/types.ts";
 import { findSecret, parseArgs, runEval } from "../eval/run.ts";
 import type { EvalOpts } from "../eval/run.ts";
 
+const REPO_DIR = path.resolve(import.meta.dirname, "..");
 const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "dsev-test-")));
 after(() => removeDir(scratch));
 
@@ -377,6 +379,23 @@ describe("task validation (--validate)", () => {
     assert.deepEqual(rows.map((r) => [r.variant, r.ok]), [["unsolved", true], ["reference", false], ["decoy", false]]);
     assert.match(rows[1]!.problems.join(), /reference fails/);
     assert.match(rows[2]!.problems.join(), /proves nothing/);
+  });
+});
+
+describe("cli: private splits", () => {
+  const runTs = path.join(REPO_DIR, "eval", "run.ts");
+  const cli = (...args: string[]) => spawnSync(process.execPath, [runTs, ...args], { encoding: "utf8", env: allowlistEnv() });
+
+  it("confirm and reserve can be validated offline but never run or dry-run from the runner", () => {
+    for (const split of ["confirm", "reserve"]) {
+      const dry = cli("--split", split, "--dry-run");
+      assert.notEqual(dry.status, 0);
+      assert.match(dry.stderr, new RegExp(`--split ${split} is only for --validate`));
+      const validate = cli("--validate", "--split", split);
+      assert.equal(validate.status, 0, validate.stderr);
+      assert.match(validate.stdout, /validated \d+ task\(s\)/);
+    }
+    assert.match(cli("--split", "bogus").stderr, /--split must be dev, heldout, all, confirm or reserve/);
   });
 });
 
