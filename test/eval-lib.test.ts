@@ -265,6 +265,19 @@ describe("runner end to end (real server, stub upstream)", () => {
     await up.close();
   });
 
+  it("records arm, purpose, lineage and the held-out set in the manifest, and a resume keeps what the first pass recorded", async () => {
+    const up = await stubUpstream();
+    const first = await runEval(opts(up.url, { only: ["ask-stub"], runId: "r-manifest", arm: "candidate", purpose: "comparison" }));
+    const m1 = JSON.parse(fs.readFileSync(path.join(first.runDir, "manifest.json"), "utf8")) as Record<string, unknown>;
+    assert.deepEqual([m1.arm, m1.purpose], ["candidate", "comparison"]);
+    assert.ok(m1.lineage === null || /^[0-9a-f]{40}$/.test(String(m1.lineage)), "lineage is a tree hash, or null outside a git checkout");
+    assert.ok("heldout_hash" in m1 && "heldout_count" in m1 && "merge_base" in m1);
+    await runEval(opts(up.url, { only: ["ask-stub"], runId: "r-manifest", resume: true, arm: "baseline", purpose: "calibration" }));
+    const m2 = JSON.parse(fs.readFileSync(path.join(first.runDir, "manifest.json"), "utf8")) as Record<string, unknown>;
+    assert.deepEqual([m2.arm, m2.purpose, m2.lineage, m2.git_sha, m2.started], [m1.arm, m1.purpose, m1.lineage, m1.git_sha, m1.started]);
+    await up.close();
+  });
+
   it("a held-out task's id and title reach no log line, manifest or public file; its details go under private/heldout/", async () => {
     put(tasksRoot, "zz-secret-held/task.json", JSON.stringify({ ...base, id: "zz-secret-held", split: "heldout", title: "zz secret held title" }));
     put(tasksRoot, "zz-secret-held/repo/src/a.js", "export const a = 1;\n");
@@ -369,6 +382,7 @@ describe("task validation (--validate)", () => {
 
 describe("cli args", () => {
   it("parses flags with and without values", () => {
+    assert.deepEqual(parseArgs(["--arm", "baseline", "--purpose", "comparison"]), { arm: "baseline", purpose: "comparison" });
     assert.deepEqual(parseArgs(["--only", "a,b", "--k", "3", "--dry-run"]), { only: "a,b", k: "3", "dry-run": true });
     assert.throws(() => parseArgs(["stray"]), /unexpected/);
   });

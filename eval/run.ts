@@ -17,6 +17,7 @@ import { runChecks } from "./lib/checks.ts";
 import { loadTasks, makeRepo, removeDir, runSetup, taskRoots } from "./lib/fixture.ts";
 import { McpClient } from "./lib/mcp.ts";
 import { SERVER_SETTINGS, allowlistEnv } from "./lib/proc.ts";
+import { computeLineage, heldoutSetHash } from "./lib/lineage.ts";
 import { isPrivate, labelOf, runSubdir } from "./lib/privacy.ts";
 import { startProxy } from "./lib/proxy.ts";
 import { validateTasks } from "./lib/validate.ts";
@@ -38,6 +39,9 @@ export interface EvalOpts {
   yes: boolean;
   maxTokens?: number | undefined;
   maxCost?: number | undefined;
+  /** Which side of a comparison this run is, and what it is for; recorded in the manifest (required by the harder-evals spec later). */
+  arm?: "baseline" | "candidate" | undefined;
+  purpose?: "calibration" | "comparison" | undefined;
   taskTimeoutS: number;
   resume: boolean;
   allowDirty: boolean;
@@ -193,14 +197,25 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
   const serverEntry = path.join(serverDir, "src", "server.ts");
   const settings: Record<string, string | undefined> = { DEEPSEEK_MODEL: "deepseek-flash", DEEPSEEK_EFFORT: "high", DEEPSEEK_THINKING: "enabled" }; // explicit, so the manifest records what ran
   for (const [k, v] of Object.entries(o.serverEnv)) if (SERVER_SETTINGS.includes(k) && v !== undefined) settings[k] = v;
-  // A resumed run may cover other tasks than the first pass did: keep the union in the manifest.
-  const prevManifest = readJsonFile<{ tasks?: string[]; started?: string }>(path.join(runDir, "manifest.json"));
+  // A resumed run may cover other tasks than the first pass did: keep the union in the manifest. Facts about how the run
+  // started (lineage, arm, purpose, the working tree's state, the held-out set) are kept from the first pass: a resume may
+  // happen on another branch, and that must not change what the run is.
+  type Prev = { tasks?: string[]; started?: string; dirty?: boolean; git_sha?: string; lineage?: string | null; merge_base?: string | null; arm?: string | null; purpose?: string | null; heldout_hash?: string | null; heldout_count?: number | null };
+  const prevManifest = readJsonFile<Prev>(path.join(runDir, "manifest.json"));
+  const lin = prevManifest?.lineage !== undefined ? null : computeLineage(o.gitBin, o.rootDir);
+  const held = prevManifest?.heldout_hash !== undefined ? null : heldoutSetHash(path.join(o.rootDir, "eval", "heldout"));
   writeAtomic(
     path.join(runDir, "manifest.json"),
     JSON.stringify({
       run_id: o.runId, started: prevManifest?.started ?? new Date().toISOString(), node: process.version, k: o.k, splits: o.splits,
-      git_sha: spawnSync(o.gitBin, ["rev-parse", "HEAD"], { cwd: o.rootDir, encoding: "utf8" }).stdout.trim(),
-      dirty: Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null },
+      git_sha: prevManifest?.git_sha ?? spawnSync(o.gitBin, ["rev-parse", "HEAD"], { cwd: o.rootDir, encoding: "utf8" }).stdout.trim(),
+      lineage: prevManifest?.lineage !== undefined ? prevManifest.lineage : lin?.lineage ?? null,
+      merge_base: prevManifest?.merge_base !== undefined ? prevManifest.merge_base : lin?.merge_base ?? null,
+      arm: prevManifest?.arm !== undefined ? prevManifest.arm : o.arm ?? null,
+      purpose: prevManifest?.purpose !== undefined ? prevManifest.purpose : o.purpose ?? null,
+      heldout_hash: prevManifest?.heldout_hash !== undefined ? prevManifest.heldout_hash : held?.hash ?? null,
+      heldout_count: prevManifest?.heldout_count !== undefined ? prevManifest.heldout_count : held?.count ?? null,
+      dirty: prevManifest?.dirty ?? Boolean(dirty), server_hash: hashTree(path.join(serverDir, "src")), settings, caps: { max_tokens: o.maxTokens ?? null, max_cost: o.maxCost ?? null },
       pricing: o.pricing ?? null, tasks: [...new Set([...(prevManifest?.tasks ?? []), ...tasks.map((t) => labelOf(t))])].sort(), skipped: skipped.map((t) => ({ id: labelOf(t), needs_role: t.needs_role })),
     }, null, 2)
   );
@@ -369,6 +384,12 @@ export function parseArgs(argv: string[]): Record<string, string | true> {
   return out;
 }
 
+function oneOf<T extends string>(v: string | true | undefined, allowed: readonly T[], flag: string): T | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v === "string" && (allowed as readonly string[]).includes(v)) return v as T;
+  throw new Error(`${flag} must be one of: ${allowed.join(", ")}`);
+}
+
 async function main(): Promise<void> {
   loadEnvFile(path.join(HERE, ".env"));
   const a = parseArgs(process.argv.slice(2));
@@ -395,6 +416,8 @@ async function main(): Promise<void> {
     yes: a.yes === true,
     maxTokens: num(a["max-tokens"]),
     maxCost: num(a["max-cost"]),
+    arm: oneOf(a.arm, ["baseline", "candidate"], "--arm"),
+    purpose: oneOf(a.purpose, ["calibration", "comparison"], "--purpose"),
     taskTimeoutS: num(a["task-timeout"]) ?? 1200,
     resume: a.resume === true,
     allowDirty: a["allow-dirty"] === true,
