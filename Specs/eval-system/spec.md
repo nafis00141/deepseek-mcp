@@ -1,6 +1,6 @@
-﻿# Spec: online eval system for deepseek-mcp
+# Spec: online eval system for deepseek-mcp
 
-Status: draft for review. Baseline server version: 0.9.0.
+Status: implemented and in use (see `Specs/STATUS.md`). Baseline server version: 0.9.0.
 
 ## Goal
 
