@@ -1,0 +1,4 @@
+order_id,customer,total,paid,note
+1001,Ada Lovelace,120.50,Y,
+1002,"Hopper, Grace",8.00,N,"Said ""call first"""
+1003,Alan Turing,0.99,Y,leave at door

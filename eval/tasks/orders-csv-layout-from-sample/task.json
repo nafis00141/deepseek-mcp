@@ -1,0 +1,41 @@
+{
+  "id": "orders-csv-layout-from-sample",
+  "family": "code",
+  "split": "dev",
+  "title": "export orders as CSV in the layout the nightly import already reads",
+  "tier": "hard",
+  "axis": "ambiguous-spec",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/orders/tasks/01-export-orders.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/export.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/export.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  },
+  "crlf_files": [
+    "samples/orders-import-sample.csv"
+  ]
+}

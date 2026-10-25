@@ -1,0 +1,38 @@
+{
+  "id": "shipping-free-threshold-dead-copy",
+  "family": "code",
+  "split": "dev",
+  "title": "free shipping threshold: change the live rule in every place that applies it",
+  "tier": "hard",
+  "axis": "larger-repo",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/ship/tasks/01-free-shipping.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/quote.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/quote.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}

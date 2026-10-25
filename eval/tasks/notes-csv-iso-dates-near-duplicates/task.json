@@ -1,0 +1,38 @@
+{
+  "id": "notes-csv-iso-dates-near-duplicates",
+  "family": "code",
+  "split": "dev",
+  "title": "CSV export dates in ISO 8601 UTC without touching the screens that share the formatter",
+  "tier": "hard",
+  "axis": "larger-repo",
+  "author": "claude-author-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "steps": [
+    {
+      "role": "impl",
+      "target": "specs/notes/tasks/01-csv-iso.md"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/export.hidden.test.js"
+      ]
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/csv.test.js"
+  },
+  "expect": {
+    "gate": "done"
+  }
+}
