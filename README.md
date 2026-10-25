@@ -24,6 +24,8 @@ The role decides four things: the prompt, the capability set enforced on every t
 | `test` | a task `.md` | tests only, one commit | same, writes restricted to test paths |
 | `review` | `specs/<feature>` | verdict JSON → `specs/review/*.md` | verdict schema |
 | `ask` | any path + instruction | cited answer, no writes | non-empty answer |
+| `research` | `specs/<feature>` + instruction | `research.md` (Question / Findings / Evidence / Open questions), no commit | sections, 400 characters, every `path:line` citation resolves (see below) |
+| `do` | a path + instruction + `paths` + `test_command` | code, one commit, no task file | tests, scope, commit count, diff cap |
 
 **Enforced in code, not in prompts:**
 
@@ -33,6 +35,32 @@ The role decides four things: the prompt, the capability set enforced on every t
 - The review gate re-derives the verdict: a `PASS` with a blocker, an unmet criterion, or no criteria becomes `FAIL`.
 - One writer at a time. An identical call to a job that already failed is refused, and a task gets `MAX_FIX_ROUNDS` (default 2) `fix` rounds before the server answers `escalate`.
 - The server makes the commit, not the model, and `run_tests` only ever runs the task's declared `test_command`.
+
+## The new roles
+
+**`do` — a change with no spec tree.** For one refactor or bug fix you do not need spec → plan → tasks first. Call `handoff` with `role: "do"`, a `target` (the folder or file the change is about), the `instruction` (the whole task), `paths` (the globs the job may change) and `test_command`.
+
+```json
+{ "role": "do", "target": "src/lib", "instruction": "make parse() accept tabs as well as commas",
+  "paths": ["src/lib/**", "tests/lib/**"], "test_command": "node --test tests/lib/parse.test.js" }
+```
+
+- Every glob in `paths` must start in a literal folder (`src/lib/**` is fine; `**/*.ts`, `*.js` and `*` are refused), must not reach `.git`, `.github`, `.claude`, `.vscode`, `.env*`, lockfiles or `specs/`, and must stay inside the repo. `test_command` must be `npm test`, `npm run <script>` (the script must exist in `package.json`) or `node --test <explicit paths>`. All of this is checked before any model call, and a refusal costs nothing.
+- The scope and test command are stored in the job record, and the gate enforces those, not a file on the branch.
+- The job works on its own branch `do/<id>-<time>` cut from the base branch, makes one server commit, and your branch comes back. `review` finds it by name (`branch` parameter).
+- An identical failed call is refused; a call with different `paths`, `test_command`, instruction or target is a new call.
+
+**`research` — a question answered into a file.** `handoff` with `role: "research"`, `target: "specs/<feature>"` and the question as `instruction`. It may read the repository and write exactly one file, `specs/<feature>/research.md`; it does not commit. The gate checks the four sections and 400 characters, and **every citation**: `path:line` or `path:start-end` must name a file that exists, is readable and has that line; a backticked quote right after a citation must be on the cited line (checked at every occurrence); at least 3 distinct citations must resolve; and none may be unresolved. A document that honestly says `NOT FOUND:` at the start of a line needs only one resolving citation, the place that was searched. The gate proves a citation points at a real line and that a quote is there; it does not prove the line supports the claim. Read the document before relying on it.
+
+**`fix` and `test` from an existing branch.** Pass `branch` to start from a branch this server has no job for:
+
+```json
+{ "role": "fix", "target": "specs/f/tasks/01-x.md", "feedback_path": "specs/review/r.md", "branch": "impl/01-abc" }
+```
+
+The name must start with `impl/`, `fix/`, `test/` or `do/`; the branch must exist, must not be the base branch or the one you are on, must have commits beyond the base, and at least one must have the server's own subject (`task-<id>: <role>`), so a branch you made yourself is never touched. The job **never commits onto it**: it cuts a new `fix/<id>-<time>` branch from its tip. The two-round cap is the larger of the count by task file and the count by source branch, so renaming a branch does not reset it. For a task the server already worked on, `fix` and `test` continue that task's branch as before.
+
+Other safety rules apply to all roles: nothing under `specs/.jobs` can be written by any role, there is no merge or push anywhere, and the only command a model can run is the declared test command.
 
 ## Inside a job
 
@@ -57,7 +85,7 @@ The role decides four things: the prompt, the capability set enforced on every t
 | `version` | no | Repo, base ref, model, key presence, Node version. |
 | `roles` | no | The registry above, generated from live config. |
 | `ping` | ~5s | One tiny DeepSeek call. Proves key + model id. |
-| `handoff` | up to `MAX_WAIT_S` (45s) | Delegate one phase. Returns the gated result if it finishes in time, otherwise a `job_id`. |
+| `handoff` | up to `MAX_WAIT_S` (45s) | Delegate one phase. Returns the gated result if it finishes in time, otherwise a `job_id`. Optional parameters: `instruction`, `feedback_path` (fix), `wait`, `branch` (review: the branch to review; fix/test: an existing server-made branch to start from), `paths` and `test_command` (do). |
 | `job_status` | optional `wait_s` | Progress while running, gated verdict once done. `wait_s` blocks up to that long for it to finish. |
 | `job_diff` | no | The code a finished `impl`/`fix`/`test` job committed, paged (`offset` = `next_offset`). Lets Claude judge the change itself instead of relying on a DeepSeek review. `.env` files are excluded. |
 | `discard` | no | Delete the work branch of a finished `impl`/`fix`/`test` job. Refused if the branch has commits not in the base branch, unless `force=true`; a forced discard returns the tip sha and a `git branch <name> <sha>` command to undo it. Never deletes the base branch or the branch you are on. |
@@ -122,7 +150,7 @@ The `command` **must** be an absolute path to `node.exe`. If you manage Node wit
 
 ## What to tell Claude in the project instructions
 
-> Never write code or specs yourself when a handoff role covers it. `spec`/`plan`/`tasks` for planning, `impl`/`fix` for code, `review` for judgement. One target per call. After a `failed` gate, read `reasons` and decide — do not re-run the same call hoping for a different answer. After `review`, act only on blockers and majors. Two rounds maximum, then escalate to me. Never merge or push.
+> Never write code or specs yourself when a handoff role covers it. `spec`/`plan`/`tasks` for planning, `impl`/`fix` for code from a task file, `do` for a single change with no task file (always with `paths` and `test_command`), `research` for a question that needs a written, cited answer, `review` for judgement. One target per call. After a `failed` gate, read `reasons` and decide — do not re-run the same call hoping for a different answer. After `review`, act only on blockers and majors. Two rounds maximum, then escalate to me. Never merge or push.
 
 ## Troubleshooting
 

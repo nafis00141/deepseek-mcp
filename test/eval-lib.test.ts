@@ -210,6 +210,30 @@ describe("hidden checks", () => {
     }
   });
 
+  it("citations_resolve: independent of the server, it checks files, lines, quotes and the minimum, with NOT FOUND lowering it", async () => {
+    const d = path.join(scratch, "fx-cite");
+    put(d, "repo/src/retry.js", "'use strict';\nconst MAX = 5;\nconst BASE = 250;\nmodule.exports = { MAX, BASE };\n");
+    const fx = makeRepo({ dir: d }, CFG.git);
+    try {
+      const ctx = { repo: fx.repo, gitBin: CFG.git, hiddenDir: path.join(d, "hidden"), steps: step({}) };
+      const run = async (body: string, extra: Record<string, unknown> = {}) => {
+        fs.mkdirSync(path.join(fx.repo, "specs"), { recursive: true });
+        fs.writeFileSync(path.join(fx.repo, "specs", "r.md"), body);
+        return (await runChecks([{ type: "citations_resolve", path: "specs/r.md", ref: "work", ...extra }], ctx))[0]!;
+      };
+      assert.equal((await run("src/retry.js:2 `const MAX = 5;` and src/retry.js:3 and src/retry.js:4")).pass, true);
+      assert.match((await run("src/retry.js:2 and src/retry.js:3 and src/retry.js:99")).detail, /unresolved: src\/retry\.js:99/);
+      assert.match((await run("src/retry.js:2 `const MAX = 9;` src/retry.js:3 src/retry.js:4")).detail, /quote not on the cited line: src\/retry\.js:2/);
+      assert.match((await run("src/retry.js:2 src/retry.js:2 src/retry.js:2")).detail, /1 distinct citation\(s\), need 3/);
+      assert.equal((await run("NOT FOUND: a rate limit\nsearched src/retry.js:1-4")).pass, true);
+      assert.equal((await run("src/retry.js:2 src/retry.js:3", { min: 2 })).pass, true);
+      assert.match((await run("src/nowhere.js:1 src/retry.js:2 src/retry.js:3 src/retry.js:4")).detail, /unresolved: src\/nowhere\.js:1/);
+      assert.match((await run("see ../outside.txt:1")).detail, /unresolved/);
+    } finally {
+      fx.remove();
+    }
+  });
+
   it("structural and answer checks", async () => {
     const fx = makeRepo({ dir }, CFG.git);
     try {
@@ -309,6 +333,23 @@ describe("runner end to end (real server, stub upstream)", () => {
     await up.close();
   });
 
+  it("passes a do step's paths and test_command through, a fix step's branch, and a research step runs under specs/", async () => {
+    put(tasksRoot, "do-stub/task.json", JSON.stringify({
+      id: "do-stub", family: "code", split: "dev", title: "do pass-through",
+      steps: [{ role: "do", target: "src", instruction: "change nothing", paths: ["src/**"], test_command: "npm test" }, { role: "research", target: "specs/topic", instruction: "what is a.js?" }],
+      checks: [{ type: "tree_clean", name: "clean" }], expect: { gate: "failed" },
+    }));
+    put(tasksRoot, "do-stub/repo/src/a.js", "export const a = 1;\n");
+    put(tasksRoot, "do-stub/repo/package.json", JSON.stringify({ scripts: { test: "node --version" } }));
+    const up = await stubUpstream();
+    const r = await runEval(opts(up.url, { only: ["do-stub"], runId: "r-do" }));
+    const rec = r.records[0]!;
+    // the do step must reach the model (it would be `blocked` without paths and test_command); the stub's reply changes nothing, so it is a noop
+    assert.deepEqual(rec.steps.map((s) => [s.role, s.status]), [["do", "noop"], ["research", "failed"]]);
+    assert.ok(up.seen.length >= 2, "both steps reached the model");
+    await up.close();
+  });
+
   it("records the server's retry of an injected 500", async () => {
     const up = await stubUpstream();
     const r = await runEval(opts(up.url, { only: ["ask-flaky"], runId: "r2" }));
@@ -369,7 +410,20 @@ describe("task validation (--validate)", () => {
     assert.ok(tasks.length >= 5, "the shipped dev suite is present (held-out tasks are gitignored and may be absent)");
     const rows = await validateTasks(tasks, CFG.git, () => {});
     assert.deepEqual(rows.filter((r) => !r.ok), []);
-    assert.equal(rows.length, tasks.filter((t) => !t.needs_role).length * 3);
+    // three variants per task, and a fourth for every task that ships a second decoy
+    assert.equal(rows.length, tasks.filter((t) => !t.needs_role).reduce((n, t) => n + 3 + (fs.existsSync(path.join(t.dir, "decoy2")) ? 1 : 0), 0));
+  });
+
+  it("a second decoy is validated like the first when the task ships one, and a second decoy that proves nothing is flagged", async () => {
+    const dir = path.join(scratch, "tasks-decoy2", "two");
+    put(dir, "task.json", JSON.stringify({ id: "two", family: "ask", split: "dev", title: "two", steps: [{ role: "ask", target: "src" }], checks: [{ type: "answer_matches", pattern: "yes" }], expect: { gate: "done" } }));
+    put(dir, "repo/src/a.js", "x\n");
+    put(dir, "reference/outcome.json", JSON.stringify({ steps: [{ status: "done", result: { answer: "yes" } }] }));
+    put(dir, "decoy/outcome.json", JSON.stringify({ steps: [{ status: "done", result: { answer: "no" } }] }));
+    put(dir, "decoy2/outcome.json", JSON.stringify({ steps: [{ status: "done", result: { answer: "yes, actually" } }] })); // passes every check
+    const rows = await validateTasks(loadTasks([path.join(scratch, "tasks-decoy2")], ["dev"]), CFG.git, () => {});
+    assert.deepEqual(rows.map((r) => [r.variant, r.ok]), [["unsolved", true], ["reference", true], ["decoy", true], ["decoy2", false]]);
+    assert.match(rows[3]!.problems.join(), /decoy2 passes every hidden check/);
   });
 
   it("flags a task whose decoy proves nothing and whose reference does not pass", async () => {

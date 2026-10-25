@@ -130,6 +130,49 @@ const RUNNERS: Record<string, (c: CheckDef, ctx: CheckCtx) => Promise<Outcome>> 
     const v = String(stepOf(ctx, c.step)?.result.verdict ?? "");
     return v.toUpperCase() === str(c.value).toUpperCase() ? ok(`verdict ${v}`) : bad(`verdict ${v || "(none)"}, expected ${str(c.value)}`);
   },
+  /**
+   * Every `path:line` citation in a document resolves in the fixture repo, a backticked quote after a citation is on its line,
+   * and there are at least `min` distinct ones (1 when the document has a `NOT FOUND:` line). Written here, not borrowed from
+   * the server's own gate: a hidden check must not depend on the code it is checking.
+   */
+  async citations_resolve(c, ctx) {
+    const txt = await readAt(ctx, str(c.ref, "work"), str(c.path));
+    if (txt === null) return bad(`${str(c.path)} not found`);
+    const re = /(?<![\w/.:@\\-])([A-Za-z0-9_@.\-/\\]+\.[A-Za-z][A-Za-z0-9]{0,7}):(\d+)(?:-(\d+))?/g;
+    const distinct = new Set<string>();
+    const unresolved: string[] = [];
+    const wrongQuote: string[] = [];
+    for (const m of txt.matchAll(re)) {
+      const file = String(m[1]).replace(/\\/g, "/").replace(/^\.\//, "");
+      const start = Number(m[2]);
+      const end = m[3] ? Number(m[3]) : start;
+      const cite = `${file}:${start}${m[3] ? `-${end}` : ""}`;
+      let lines: string[] | null = null;
+      try {
+        const abs = path.resolve(ctx.repo, file);
+        if (abs.startsWith(path.resolve(ctx.repo) + path.sep) && fs.statSync(abs).isFile()) {
+          lines = fs.readFileSync(abs, "utf8").split(/\r?\n/);
+          if (lines[lines.length - 1] === "") lines.pop();
+        }
+      } catch {
+        lines = null;
+      }
+      if (!lines || start < 1 || end < start || end > lines.length) {
+        if (!unresolved.includes(cite)) unresolved.push(cite);
+        continue;
+      }
+      distinct.add(cite);
+      const tail = txt.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 400);
+      const quote = /^`?\s*(?:[-–—:]\s*)?`([^`\n]{1,300})`/.exec(tail)?.[1];
+      const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+      if (quote && !squash(lines.slice(start - 1, end).join(" ")).includes(squash(quote)) && !wrongQuote.includes(cite)) wrongQuote.push(cite);
+    }
+    const notFound = /^\s*(?:[-*>]\s*)?(?:\*\*)?NOT FOUND:/im.test(txt);
+    const need = notFound ? 1 : num(c.min) ?? 3;
+    if (unresolved.length) return bad(`unresolved: ${unresolved.slice(0, 4).join(", ")}`);
+    if (wrongQuote.length) return bad(`quote not on the cited line: ${wrongQuote.slice(0, 4).join(", ")}`);
+    return distinct.size >= need ? ok(`${distinct.size} distinct citation(s) resolve`) : bad(`${distinct.size} distinct citation(s), need ${need}`);
+  },
   /** A finding in the saved review file (the full list, not the 12 the job result keeps) whose file and text match. */
   async review_finding(c, ctx) {
     const p = stepOf(ctx, c.step)?.result.review_path;

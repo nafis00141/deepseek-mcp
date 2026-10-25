@@ -23,7 +23,8 @@ interface Outcome {
 
 export interface ValidationRow {
   task: string;
-  variant: "unsolved" | "reference" | "decoy";
+  /** decoy2 is a second, different decoy; it is validated like the first whenever the task has a decoy2/ folder */
+  variant: "unsolved" | "reference" | "decoy" | "decoy2";
   ok: boolean;
   problems: string[];
   checks: string;
@@ -31,6 +32,8 @@ export interface ValidationRow {
 
 async function simulate(task: LoadedTask, variant: ValidationRow["variant"], gitBin: string): Promise<ValidationRow> {
   const dir = path.join(task.dir, variant);
+  /** the kind of expectation: both decoys must be accepted by the gate and still fail a hidden check */
+  const kind = variant === "decoy2" ? "decoy" : variant;
   const problems: string[] = [];
   const outFile = path.join(dir, "outcome.json");
   if (!fs.existsSync(outFile) && variant !== "unsolved") return { task: task.id, variant, ok: false, problems: [`missing ${variant}/outcome.json`], checks: "" };
@@ -51,7 +54,7 @@ async function simulate(task: LoadedTask, variant: ValidationRow["variant"], git
       fx.git("commit", "-qm", "simulated job");
     }
     let visible = "";
-    if (task.validate?.visible_test && variant !== "unsolved" && (task.validate.visible_test_on ?? ["reference", "decoy"]).includes(variant)) {
+    if (task.validate?.visible_test && kind !== "unsolved" && (task.validate.visible_test_on ?? ["reference", "decoy"]).includes(kind)) {
       const [cmd, ...args] = task.validate.visible_test.split(/\s+/);
       const r = await runProc(cmd === "node" ? process.execPath : cmd!, args, { cwd: fx.repo, env: allowlistEnv(), timeoutMs: 60000 });
       visible = r.code === 0 ? "" : `visible test failed: ${r.out.split(/\r?\n/).slice(-3).join(" | ").slice(0, 200)}`;
@@ -63,12 +66,12 @@ async function simulate(task: LoadedTask, variant: ValidationRow["variant"], git
     const results = await runChecks(task.checks, { repo: fx.repo, gitBin, hiddenDir: path.join(task.dir, "hidden"), steps });
     const failing = results.filter((r) => !r.pass);
     const gate = steps[steps.length - 1]?.status ?? "";
-    if (variant === "reference") {
+    if (kind === "reference") {
       if (failing.length) problems.push(`reference fails: ${failing.map((f) => `${f.name} (${f.detail})`).join("; ")}`);
       if (!task.expect.gate.split("|").includes(gate)) problems.push(`reference gate is "${gate}", task expects "${task.expect.gate}"`);
-    } else if (variant === "decoy") {
-      if (!failing.length) problems.push("decoy passes every hidden check, so it proves nothing");
-      if (!["done", "noop"].includes(gate)) problems.push(`decoy gate is "${gate}": a decoy must be accepted by the gate (done/noop)`);
+    } else if (kind === "decoy") {
+      if (!failing.length) problems.push(`${variant} passes every hidden check, so it proves nothing`);
+      if (!["done", "noop"].includes(gate)) problems.push(`${variant} gate is "${gate}": a decoy must be accepted by the gate (done/noop)`);
     } else if (!failing.length) problems.push("the unsolved fixture already passes every check");
     return { task: task.id, variant, ok: problems.length === 0, problems, checks: `${results.length - failing.length}/${results.length} pass` };
   } finally {
@@ -83,7 +86,8 @@ export async function validateTasks(tasks: LoadedTask[], gitBin: string, log: (l
       log(`  N/A ${t.id} (needs role "${t.needs_role}")`);
       continue;
     }
-    for (const v of ["unsolved", "reference", "decoy"] as const) {
+    const variants: ValidationRow["variant"][] = ["unsolved", "reference", "decoy", ...(fs.existsSync(path.join(t.dir, "decoy2")) ? (["decoy2"] as const) : [])];
+    for (const v of variants) {
       const row = await simulate(t, v, gitBin).catch((e: Error) => ({ task: t.id, variant: v, ok: false, problems: [`validation crashed: ${e.message.slice(0, 200)}`], checks: "" }));
       rows.push(row);
       log(`  ${row.ok ? "ok  " : "FAIL"} ${t.id} / ${v}${row.checks ? ` [${row.checks}]` : ""}${row.problems.map((p) => `\n         ${p}`).join("")}`);
