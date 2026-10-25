@@ -65,3 +65,7 @@ Not done: T8-T15 (the 12 hard dev tasks), T16 (4 hard reserve tasks), T17 (calib
 1. Push the local `harder-evals` commits when the owner says.
 2. T8-T15, then T16, then T17 (spend), T18, T19. T17 now follows `new-roles` landing, as the spec required.
 3. A first live confirmation run is the owner's call.
+
+## 5. long-context (`Specs/long-context/`) - specified and reviewed, nothing built
+
+Spec v2, plan and 13 tasks written 2026-10-26 and reviewed by Opus 5.5 (high); all 19 findings addressed. Idea: make the server's context limits settings with unchanged defaults, add token-aware cache-friendly compaction, a job input-token guard and metrics, build six generated extra-large eval tasks, and measure four setting arms (baseline, caps-only, 250K-token primary, top) with one pre-registered decision comparison. Not done: all tasks (T1-T13). Anything that spends (T10-T12) needs the owner's approval of an estimate.
