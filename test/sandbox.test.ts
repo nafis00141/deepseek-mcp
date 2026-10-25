@@ -105,6 +105,34 @@ describe("line endings", () => {
   });
 });
 
+describe("job records are never writable", () => {
+  it("no role can create, overwrite or edit anything under specs/.jobs, even doc roles whose caps cover specs/**", async () => {
+    put("specs/.jobs/aaaaaaaa.json", '{"state":"running"}');
+    put("specs/.jobs/aaaaaaaa.prompt.txt", "the prompt");
+    const roles = [
+      capsFor("spec", ROLES.spec, null),
+      capsFor("plan", ROLES.plan, null),
+      capsFor("tasks", ROLES.tasks, null),
+      capsFor("impl", ROLES.impl, mkTask({ allowedPaths: ["specs/**", "src/**"] })),
+    ];
+    for (const c of roles) {
+      refused(await executeTool("write_file", { path: "specs/.jobs/aaaaaaaa.json", content: "{}" }, c), /not permitted/);
+      refused(await executeTool("write_file", { path: "specs/.jobs/new.trace.jsonl", content: "x" }, c), /not permitted/);
+      refused(await executeTool("edit_file", { path: "specs/.jobs/aaaaaaaa.prompt.txt", old: "the", new: "a" }, c), /not permitted/);
+      refused(await executeTool("write_file", { path: "specs/.jobs/../.jobs/aaaaaaaa.json", content: "{}" }, c), /not permitted/);
+    }
+    assert.equal(read("specs/.jobs/aaaaaaaa.json"), '{"state":"running"}');
+    assert.equal(read("specs/.jobs/aaaaaaaa.prompt.txt"), "the prompt");
+    assert.ok(!exists("specs/.jobs/new.trace.jsonl"));
+  });
+
+  it("the rest of specs/ stays writable for doc roles", async () => {
+    const doc = capsFor("spec", ROLES.spec, null);
+    assert.equal((await executeTool("write_file", { path: "specs/feature/spec.md", content: "# x" }, doc)).error, undefined);
+    assert.equal((await executeTool("write_file", { path: "specs/review/r.md", content: "x" }, doc)).error, undefined);
+  });
+});
+
 describe("per-role capabilities", () => {
   it("review is read-only and has no test command", async () => {
     const ro = capsFor("review", ROLES.review, null);

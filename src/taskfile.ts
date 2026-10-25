@@ -99,6 +99,8 @@ const DENY_WRITE = [
   /^\.github(\/|$)/i,
   /^\.claude(\/|$)/i,
   /^\.vscode(\/|$)/i,
+  // Job records, prompts, traces and logs: a doc role has `specs/**` caps and must not be able to rewrite them.
+  /^specs\/\.jobs(\/|$)/i,
   /(^|\/)\.env(\..*)?$/i,
   /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i,
 ];
