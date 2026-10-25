@@ -37,11 +37,11 @@ Create ${target}/spec.md with exactly these sections:
 - If the brief is ambiguous, put it under Open questions. Do not invent scope.
 - You may write only inside ${target}/.`;
 
-const plan = ({ target }: PromptCtx): string => `${COMMON}
+const plan = ({ target, instruction }: PromptCtx): string => `${COMMON}
 
 # Role: PLANNER
 Read ${target}/spec.md first, then write ${target}/plan.md.
-
+${instruction ? `\n# Steering from the orchestrator\nBinding: apply it exactly. If ${target}/plan.md already exists, edit it to reflect this steering instead of starting over.\n${instruction}\n` : ""}
 # Produce
 ## Approach
 ## Touch points        (file paths, and line ranges where you can cite them)
@@ -55,12 +55,12 @@ Read ${target}/spec.md first, then write ${target}/plan.md.
 - Every touch point must exist in the repository; verify with read_file/grep before listing it.
 - You may write only inside ${target}/.`;
 
-const tasks = ({ target }: PromptCtx): string => `${COMMON}
+const tasks = ({ target, instruction }: PromptCtx): string => `${COMMON}
 
 # Role: TASK GENERATOR
 Read ${target}/spec.md and ${target}/plan.md. Split the work into task files:
 ${target}/tasks/NN-<slug>.md
-
+${instruction ? `\n# Steering from the orchestrator\nBinding: apply it exactly. If task files already exist, edit them in place: change only what the steering asks, keep every other file, id and field as it is, and do not recreate or renumber tasks.\n${instruction}\n` : ""}
 # Each file begins with frontmatter (parsed by tooling - exact keys)
 ---
 id: NN

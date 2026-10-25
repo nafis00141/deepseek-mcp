@@ -76,6 +76,15 @@ describe("context pack and prompts", () => {
     }
   });
 
+  it("plan and tasks prompts carry the instruction as binding steering, and omit the section without one", () => {
+    for (const role of ["plan", "tasks"] as const) {
+      const p = buildPrompt(role, { target: "specs/f", instruction: "USE-FILE-X" });
+      assert.ok(p.includes("# Steering from the orchestrator") && p.includes("USE-FILE-X"), role);
+      assert.ok(!buildPrompt(role, { target: "specs/f" }).includes("Steering from the orchestrator"), role);
+    }
+    assert.ok(buildPrompt("tasks", { target: "specs/f", instruction: "x" }).includes("edit them in place"));
+  });
+
   it("buildPrompt appends the pack after the rules, and only when there is one", () => {
     assert.ok(buildPrompt("ask", { instruction: "q", target: "src", pack: "PACKX" }).split("# Context pack")[1]?.includes("PACKX"));
     assert.ok(!buildPrompt("ask", { instruction: "q", target: "src" }).includes("# Context pack"));

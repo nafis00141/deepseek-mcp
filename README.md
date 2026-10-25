@@ -164,6 +164,20 @@ test/            Offline tests on node:test (mock DeepSeek + throwaway git repo;
 
 - Add `specs/.jobs/` and `specs/review/` to your repo's `.gitignore`.
 - Doc roles write under `specs/` and do **not** commit; you review and commit them. Jobs left `running` by a previous server process are marked `interrupted` on startup.
+## Evals
+
+`eval/` measures the harness with real DeepSeek calls (design: `Specs/eval-system/`). Every job also writes `specs/.jobs/<id>.trace.jsonl` (turns, tool calls, repairs, retries, usage, gate verdict).
+
+```powershell
+node eval/run.ts --validate --split all          # offline: every task's checks must fail unsolved, pass the reference, fail the decoy
+node eval/run.ts --dry-run                        # plan and estimate, no API call
+node eval/run.ts --only ask-cite --k 1 --max-tokens 300000 --yes --allow-dirty   # live; needs DEEPSEEK_API_KEY or eval/.env
+```
+
+`node eval/score.ts <run-id>` scores a finished run offline (no API call) and writes `scores.json` and `report.md`: hidden-check pass rate, gate acceptance, false accepts and rejects, first-try passes, instruction compliance, repairs, turns, tokens, wall time and refused tool calls, with mean and spread over repeats. Held-out tasks show only as one aggregate; their details go to `heldout-private/`.
+
+The real key stays in the runner and a local proxy; the server under test gets a random bearer. Runs land in `runs/<id>/`. Held-out tasks live in `eval/heldout/` (gitignored).
+
 ## Branches and results
 
 - **No stacking.** Each `impl` starts from your base branch (`main`/`master`, or `BASE_REF`), not from whatever the last job left behind. If the task lists `depends_on` and exactly one dependency is still unmerged, it starts from that branch; two or more unmerged dependencies are refused until you merge them. `fix` and `test` continue the task's own branch, so there is one branch per task.
