@@ -30,11 +30,29 @@ export function report(res: Pick<ExecResult, "summary" | "repairs"> | null | und
  * Self-check run inside the job when the model says it is finished. Returning a problem sends it
  * back to the model (see runAgent) instead of failing the job and costing Claude a round trip.
  */
-export function makeVerifier(mode: string, task: Task | null | undefined): ((text: string) => Promise<VerifyProblem | null>) | null {
+export function makeVerifier(mode: string, task: Task | null | undefined, opts: { researchDoc?: string | undefined } = {}): ((text: string) => Promise<VerifyProblem | null>) | null {
   if (mode === "text") return null;
   return async (text: string): Promise<VerifyProblem | null> => {
     if (GAP_RE.test(text)) return null; // an honest "can't" is not repaired
     const summary = parseSummary(text);
+    // A research document is checked here too, so an unresolved citation or a wrong quote is fixed inside the job (the model is
+    // told exactly which) rather than failing the gate and costing Claude a round trip. The gate runs the same check afterwards.
+    if (opts.researchDoc && summary) {
+      let doc: string | null = null;
+      try {
+        doc = fs.readFileSync(path.join(CFG.repo, opts.researchDoc), "utf8");
+      } catch {
+        /* not written */
+      }
+      if (doc === null) return { why: "research document not written", message: `${opts.researchDoc} does not exist. Create it with the four required sections, then finish again with the summary block.` };
+      const reasons = citationReasons(citationProblems(doc));
+      if (reasons.length) {
+        return {
+          why: `citations: ${clip(reasons[0] as string, 100)}`,
+          message: `The harness checked every citation in ${opts.researchDoc} against the repository and found problems:\n- ${reasons.join("\n- ")}\n\nRead the cited files again, correct or remove the wrong citations (a line number must be inside the file; a quote after a citation must be copied exactly from that line), keep at least 3 distinct valid citations (or one, if you report NOT FOUND:), then finish again with the summary block.`,
+        };
+      }
+    }
     if (mode === "review") {
       if (typeof summary?.verdict !== "string") {
         return {

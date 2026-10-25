@@ -8,6 +8,8 @@ export interface StepDef {
   instruction?: string;
   /** Use the review file written by step N (1-based) as feedback_path. */
   feedback_from_step?: number;
+  /** A literal feedback_path (a review file the fixture already holds). */
+  feedback_path?: string;
   /** review: the branch to review (for fixtures whose setup.ts creates it). fix/test: an existing branch to start from. */
   branch?: string;
   /** role=do: the globs the job may change, and its test command. */

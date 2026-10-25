@@ -1,0 +1,38 @@
+{
+  "id": "fix-refuses-handmade-branch",
+  "family": "failure",
+  "split": "dev",
+  "title": "role=fix from a branch a person made: the server must refuse it and touch nothing",
+  "author": "orchestrator-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "tier": "regression",
+  "steps": [
+    {
+      "role": "fix",
+      "target": "specs/lib/tasks/01-lib.md",
+      "feedback_path": "specs/review/01.md",
+      "branch": "impl/hand-made"
+    }
+  ],
+  "checks": [
+    {
+      "type": "result_field",
+      "name": "refused-for-the-right-reason",
+      "compliance": true,
+      "path": "reason",
+      "matches": "no commit made by this server"
+    },
+    {
+      "type": "no_commit",
+      "name": "no-work-branch"
+    },
+    {
+      "type": "tree_clean",
+      "name": "nothing-left-behind"
+    }
+  ],
+  "expect": {
+    "gate": "blocked"
+  }
+}

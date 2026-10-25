@@ -1,0 +1,10 @@
+{
+  "steps": [
+    {
+      "status": "blocked",
+      "result": {
+        "reason": "branch impl/hand-made has no commit made by this server (a subject like \"task-01: impl\"), so it is not a branch this tool family produced"
+      }
+    }
+  ]
+}

@@ -2,10 +2,37 @@
   "id": "fix-after-finding",
   "family": "fix",
   "split": "dev",
-  "title": "fix only continues a branch created by an impl job in this server's history; a seeded branch plus review file cannot start it",
-  "needs_role": "fix-from-branch",
-  "steps": [],
-  "checks": [],
+  "title": "role=fix from a branch the server has no job for: address both findings of a review",
+  "author": "orchestrator-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "tier": "regression",
+  "steps": [
+    {
+      "role": "fix",
+      "target": "specs/rng/tasks/01-range.md",
+      "feedback_path": "specs/review/01.md",
+      "branch": "impl/01-range",
+      "instruction": "Address the blocker and the major finding."
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "hidden-tests",
+      "compliance": true,
+      "files": [
+        "tests/range.hidden.test.js"
+      ]
+    },
+    {
+      "type": "file_contains",
+      "name": "typeerror-guard-present",
+      "ref": "branch",
+      "path": "src/range.js",
+      "pattern": "TypeError"
+    }
+  ],
   "expect": {
     "gate": "done"
   }

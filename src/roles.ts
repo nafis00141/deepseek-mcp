@@ -121,8 +121,9 @@ ${instruction || task?.body || "(no instruction)"}
 3. Run the tests with run_tests until they pass: ${task?.testCommand || "(no command declared)"}
    The harness runs them again when you finish; if they fail you will be asked to repair, a limited number of times.
 4. Do NOT run git and do NOT commit. The harness commits your work after you finish.
-5. If the task is contradictory or impossible: change NOTHING and print exactly
+5. If the task as a whole is contradictory or impossible: change NOTHING and print exactly
    SPEC_GAP: <one line explaining the conflict>
+   If only part of it is out of reach (for example it asks for a change in a file outside rule 1), do the part that is inside rule 1 and run the tests. List the rest in not_done and finish with status "partial". Do not print SPEC_GAP for that.
 6. Make the smallest change that does what is asked.`;
 };
 

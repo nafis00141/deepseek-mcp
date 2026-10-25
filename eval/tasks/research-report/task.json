@@ -1,11 +1,56 @@
 {
   "id": "research-report",
-  "family": "ask",
+  "family": "writing",
   "split": "dev",
-  "title": "ask returns clipped text and writes nothing; a researched report saved as an artifact has no role",
-  "needs_role": "research",
-  "steps": [],
-  "checks": [],
+  "title": "role=research: a cited answer that combines two files and ignores a stale README",
+  "author": "orchestrator-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "tier": "regression",
+  "steps": [
+    {
+      "role": "research",
+      "target": "specs/session",
+      "instruction": "How many minutes does a session last for a premium user? Name the file and line that set the base length and the file and line that set the premium multiplier."
+    }
+  ],
+  "checks": [
+    {
+      "type": "file_contains",
+      "name": "right-value",
+      "ref": "work",
+      "path": "specs/session/research.md",
+      "pattern": "\\b120\\b"
+    },
+    {
+      "type": "file_contains",
+      "name": "cites-the-base",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/session/research.md",
+      "pattern": "src/session\\.js:\\d"
+    },
+    {
+      "type": "file_contains",
+      "name": "cites-the-multiplier",
+      "compliance": true,
+      "ref": "work",
+      "path": "specs/session/research.md",
+      "pattern": "src/tiers\\.js:\\d"
+    },
+    {
+      "type": "citations_resolve",
+      "name": "citations-resolve",
+      "ref": "work",
+      "path": "specs/session/research.md",
+      "min": 3
+    },
+    {
+      "type": "only_changed_under",
+      "name": "writes-only-specs",
+      "prefix": "specs/"
+    }
+  ],
   "expect": {
     "gate": "done"
   }

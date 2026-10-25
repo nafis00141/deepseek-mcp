@@ -84,6 +84,11 @@ describe("do: prompt and registry", () => {
     for (const piece of ["no spec and no task file", "make parse() accept tabs", "Only create or modify files matching: src/lib/**", "run_tests until they pass: node --test tests/lib.test.js", "SPEC_GAP:", "Do NOT run git"]) assert.ok(p.includes(piece), piece);
   });
 
+  it("sends a task that is only partly out of reach down the partial path, and keeps SPEC_GAP for one that is wholly contradictory", () => {
+    const p = buildPrompt("do", { target: "src/lib", instruction: "x", task });
+    for (const piece of ["If the task as a whole is contradictory or impossible: change NOTHING", "SPEC_GAP: <one line explaining the conflict>", "If only part of it is out of reach", "do the part that is inside rule 1", 'finish with status "partial"', "Do not print SPEC_GAP for that"]) assert.ok(p.includes(piece), piece);
+  });
+
   it("is a code role on its own branch, needs paths and test_command, and is listed", () => {
     assert.deepEqual([ROLES.do.caps, ROLES.do.mode, ROLES.do.branch, ROLES.do.synthetic, ROLES.do.needsTask], ["code", "code", true, true, undefined]);
   });

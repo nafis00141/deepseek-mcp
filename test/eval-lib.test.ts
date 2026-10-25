@@ -390,8 +390,8 @@ describe("runner end to end (real server, stub upstream)", () => {
   it("dry-run makes no upstream request and starts no server; live needs a cap and --yes", async () => {
     const up = await stubUpstream();
     const lines: string[] = [];
-    const dry = await runEval(opts(up.url, { dryRun: true, runId: "r4", log: (l) => lines.push(l) }));
-    assert.deepEqual([dry.records.length, dry.planned, up.seen.length], [0, 3, 0], "ask-stub, ask-flaky and do-stub are planned; nothing is run or sent");
+    const dry = await runEval(opts(up.url, { dryRun: true, runId: "r4", only: ["ask-stub", "ask-flaky"], log: (l) => lines.push(l) }));
+    assert.deepEqual([dry.records.length, dry.planned, up.seen.length], [0, 2, 0], "two tasks are planned; nothing is run or sent");
     assert.ok(lines.some((l) => l.includes("estimate")));
     assert.ok(!fs.existsSync(path.join(scratch, "runs", "r4")));
     await assert.rejects(runEval(opts(up.url, { runId: "r5", maxTokens: undefined })), /hard cap/);

@@ -109,7 +109,7 @@ function patchJob(id: string, fields: Partial<Job>): Job | null {
   return next;
 }
 
-async function executeJob(jobId: string, ctx: { prompt: string; caps: Caps; mode: Mode; task: Task | null }): Promise<void> {
+async function executeJob(jobId: string, ctx: { prompt: string; caps: Caps; mode: Mode; task: Task | null; researchDoc?: string | undefined }): Promise<void> {
   const job = readJob(jobId);
   if (!job) throw new Error(`job record ${jobId} is missing`);
   let res: ExecResult | null = null;
@@ -123,7 +123,7 @@ async function executeJob(jobId: string, ctx: { prompt: string; caps: Caps; mode
     logPath: job.logPath,
     signal: ctrl.signal,
     trace,
-    verify: makeVerifier(ctx.mode, ctx.task),
+    verify: makeVerifier(ctx.mode, ctx.task, { researchDoc: ctx.researchDoc }),
     onProgress: (m) => progress.set(jobId, m),
   });
 
@@ -408,7 +408,7 @@ server.tool(
       state: "running",
     });
 
-    const promise = executeJob(jobId, { prompt, caps: capsFor(roleKey, role, task, targetRel), mode: role.mode, task })
+    const promise = executeJob(jobId, { prompt, caps: capsFor(roleKey, role, task, targetRel), mode: role.mode, task, researchDoc: role.caps === "research" ? `${targetRel}/${role.artifact}` : undefined })
       .catch((e) => {
         log(`job ${jobId} crashed: ${(e as Error).message}`);
         const j = readJob(jobId);

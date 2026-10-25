@@ -253,7 +253,7 @@ export async function runEval(o: EvalOpts): Promise<{ runDir: string; records: R
       await client.start();
       for (const [i, def] of task.steps.entries()) {
         const n = i + 1;
-        const feedback = def.feedback_from_step ? steps[def.feedback_from_step - 1]?.result.review_path : undefined;
+        const feedback = def.feedback_from_step ? steps[def.feedback_from_step - 1]?.result.review_path : def.feedback_path;
         let res = await client.call("handoff", { role: def.role, target: resolveTarget(fx.repo, def.target), ...(def.instruction ? { instruction: def.instruction } : {}), ...(def.branch ? { branch: def.branch } : {}), ...(def.paths ? { paths: def.paths } : {}), ...(def.test_command ? { test_command: def.test_command } : {}), ...(typeof feedback === "string" ? { feedback_path: feedback } : {}), wait: true }, 150000);
         // job_status replies carry no job_id, so remember the id from the handoff reply.
         const jobId = typeof res.job_id === "string" ? res.job_id : null;

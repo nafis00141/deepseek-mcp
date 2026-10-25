@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { cleanup, exists, finalDone, mkJob, mkRes, put, read, resetRepo, script, sh, tmp, toolCall } from "./helpers.ts";
 import { capsFor, executeTool, runAgent } from "../src/engine.ts";
-import { citationProblems, gate } from "../src/gates.ts";
+import { citationProblems, gate, makeVerifier } from "../src/gates.ts";
 import { buildPrompt, ROLES } from "../src/roles.ts";
 import { snapshot } from "../src/repo.ts";
 import type { ExecResult, Job } from "../src/types.ts";
@@ -50,6 +50,53 @@ describe("research caps", () => {
   it("the prompt states the one writable file, the citation form, the quote rule and the NOT FOUND outcome", () => {
     const p = buildPrompt("research", { target: "specs/topic", instruction: "What is the retry limit?" });
     for (const piece of ["Question: What is the retry limit?", "exactly one file: specs/topic/research.md", "## Evidence", "path:line", "at least 3 distinct citations", "NOT FOUND:"]) assert.ok(p.includes(piece), piece);
+  });
+});
+
+describe("research: citations are repaired inside the job", () => {
+  const DOC = "specs/topic/research.md";
+  const body = (cites: string) => ["# R", "## Question", "What is the retry policy and where is it set, in this module? ".repeat(2), "## Findings", cites, "## Evidence", "src/retry.js:2 src/retry.js:3 src/retry.js:4", "## Open questions", "None.", ""].join("\n");
+  beforeEach(() => put("src/retry.js", SOURCE));
+
+  it("the verifier hands the model the exact problems, and accepts a good document, a NOT FOUND one, and an honest SPEC_GAP", async () => {
+    const verify = makeVerifier("doc", null, { researchDoc: DOC })!;
+    const summary = '```json\n{"status":"done","did":[],"not_done":[],"notes":""}\n```';
+    assert.match((await verify(summary))?.why ?? "", /research document not written/);
+    put(DOC, body("retries: src/retry.js:2, wait: src/retry.js:99"));
+    const bad = await verify(summary);
+    assert.match(bad?.why ?? "", /^citations: unresolved citation\(s\): src\/retry\.js:99/);
+    assert.match(bad?.message ?? "", /src\/retry\.js:99 \(line outside the file \(5 lines\)\)/);
+    assert.match(bad?.message ?? "", /a line number must be inside the file/);
+    put(DOC, body("retries: src/retry.js:2 `const MAX_RETRIES = 7;`"));
+    assert.match((await verify(summary))?.message ?? "", /quote not on the cited line: src\/retry\.js:2/);
+    put(DOC, body("retries are capped (src/retry.js:2)"));
+    assert.equal(await verify(summary), null);
+    put(DOC, body("NOT FOUND: a rate limit; searched src/retry.js:1-5"));
+    assert.equal(await verify(summary), null, "an honest NOT FOUND needs one citation");
+    assert.equal(await verify("SPEC_GAP: impossible"), null, "an honest refusal is not repaired");
+    assert.match((await verify("no json at all"))?.why ?? "", /no summary json/, "the summary check still comes first");
+  });
+
+  it("a code or review job's verifier is not affected", async () => {
+    assert.equal(await makeVerifier("review", null)?.('```json\n{"verdict":"PASS"}\n```'), null);
+    assert.equal(makeVerifier("text", null, { researchDoc: DOC }), null);
+  });
+
+  it("through the agent loop: a document with a wrong citation is rewritten once, and the corrected one is what is left", async () => {
+    script.push(
+      toolCall("write_file", { path: DOC, content: body("retries: src/retry.js:2, wait: src/retry.js:50") }),
+      finalDone,
+      toolCall("write_file", { path: DOC, content: body("retries: src/retry.js:2, wait: src/retry.js:4") }),
+      finalDone,
+    );
+    const events: { type: string; why?: string }[] = [];
+    const out = await runAgent({ prompt: "go", caps: capsFor("research", ROLES.research, null, "specs/topic"), logPath: path.join(tmp, "research-repair.log"), verify: makeVerifier("doc", null, { researchDoc: DOC }), trace: (e) => void events.push(e as never) });
+    assert.equal(out.repairs.length, 1);
+    assert.match(out.repairs[0]?.why ?? "", /^citations: unresolved citation/);
+    assert.equal(out.turns, 4);
+    assert.match(read(DOC), /src\/retry\.js:4/);
+    assert.ok(!read(DOC).includes("src/retry.js:50"));
+    assert.deepEqual(events.filter((e) => e.type === "repair").length, 1);
   });
 });
 

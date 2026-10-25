@@ -2,10 +2,73 @@
   "id": "free-form-refactor",
   "family": "code",
   "split": "dev",
-  "title": "a repo-wide change with no spec/plan/tasks tree: every code role needs a task file Claude Desktop cannot write",
-  "needs_role": "do",
-  "steps": [],
-  "checks": [],
+  "title": "role=do: extract triplicated money formatting, no task file, behaviour unchanged",
+  "author": "orchestrator-session",
+  "authored_on": "2026-10-26",
+  "authored_after_result": false,
+  "tier": "regression",
+  "steps": [
+    {
+      "role": "do",
+      "target": "src/billing",
+      "instruction": "The money formatting (the fmt arrow function) is copied into invoice.js, receipt.js and summary.js. Move it into one new module src/billing/money.js exporting formatMoney, and make the three files use it. Behaviour must not change.",
+      "paths": [
+        "src/billing/**"
+      ],
+      "test_command": "node --test tests/billing.test.js"
+    }
+  ],
+  "checks": [
+    {
+      "type": "node_test",
+      "name": "behaviour-preserved",
+      "files": [
+        "tests/billing.hidden.test.js"
+      ]
+    },
+    {
+      "type": "file_not_contains",
+      "name": "invoice-has-no-copy",
+      "compliance": true,
+      "ref": "branch",
+      "path": "src/billing/invoice.js",
+      "pattern": "padStart"
+    },
+    {
+      "type": "file_not_contains",
+      "name": "receipt-has-no-copy",
+      "compliance": true,
+      "ref": "branch",
+      "path": "src/billing/receipt.js",
+      "pattern": "padStart"
+    },
+    {
+      "type": "file_not_contains",
+      "name": "summary-has-no-copy",
+      "compliance": true,
+      "ref": "branch",
+      "path": "src/billing/summary.js",
+      "pattern": "padStart"
+    },
+    {
+      "type": "file_pattern_count",
+      "name": "one-formatter",
+      "ref": "branch",
+      "path": "src/billing/money.js",
+      "pattern": "padStart",
+      "flags": "g",
+      "min": 1,
+      "max": 1
+    },
+    {
+      "type": "commit_count",
+      "name": "one-commit",
+      "equals": 1
+    }
+  ],
+  "validate": {
+    "visible_test": "node --test tests/billing.test.js"
+  },
   "expect": {
     "gate": "done"
   }
