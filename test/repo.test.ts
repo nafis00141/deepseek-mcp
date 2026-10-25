@@ -85,6 +85,12 @@ describe("context pack and prompts", () => {
     assert.ok(buildPrompt("tasks", { target: "specs/f", instruction: "x" }).includes("edit them in place"));
   });
 
+  it("review prompt keeps the verdict to PASS or FAIL and keeps unmentioned inputs out of the criteria", () => {
+    const p = buildPrompt("review", { target: "specs/f" });
+    assert.ok(p.includes('The verdict is exactly "PASS" or "FAIL"'));
+    assert.ok(p.includes("never makes a criterion \"not met\""));
+  });
+
   it("buildPrompt appends the pack after the rules, and only when there is one", () => {
     assert.ok(buildPrompt("ask", { instruction: "q", target: "src", pack: "PACKX" }).split("# Context pack")[1]?.includes("PACKX"));
     assert.ok(!buildPrompt("ask", { instruction: "q", target: "src" }).includes("# Context pack"));

@@ -138,6 +138,8 @@ ${instruction ? `\n# Extra focus\n${instruction}\n` : ""}
 # Rules
 - Every finding cites a file and a line present in the diff. No evidence, no finding.
 - Things you dislike but the spec does not require: "scope_creep" only, severity minor.
+- Judge each criterion on the inputs and cases the spec and task describe. Behaviour on inputs they never mention (NaN, null, wrong types, extreme magnitudes) is at most a minor finding, unless the spec states a rule for them. It never makes a criterion "not met" and never makes a blocker.
+- The verdict is exactly "PASS" or "FAIL". Nothing else.
 - verdict PASS requires every criterion met AND zero blockers.
 
 # Output (instead of the usual summary)
