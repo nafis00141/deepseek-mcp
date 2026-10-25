@@ -29,11 +29,12 @@ import {
 } from "./repo.ts";
 import { ROLES, ROLE_NAMES, buildPrompt } from "./roles.ts";
 import { capsFor, ping as pingModel, runAgent } from "./engine.ts";
-import { GAP_RE, gate, makeVerifier } from "./gates.ts";
+import { GAP_RE, doCallProblems, gate, makeVerifier } from "./gates.ts";
 import { buildContextPack } from "./context.ts";
 import { traceSink } from "./trace.ts";
 import { branchExists, discardBranch, latestBranchFor, planBranch, restoreBranch } from "./branching.ts";
-import { isDeniedWrite, matchAny, readTask, scopeFor, scopeProblems } from "./taskfile.ts";
+import { isDeniedWrite, matchAny, readTask, scopeFor, scopeProblems, syntheticTask } from "./taskfile.ts";
+import { callKey } from "./callkey.ts";
 import type { Task } from "./taskfile.ts";
 import type { Caps, ExecResult, Job, JobResult, Mode, RoleName } from "./types.ts";
 
@@ -226,7 +227,7 @@ server.tool("roles", "List the handoff roles, what each produces, and how it is 
       role: n,
       does: ROLES[n].title,
       writes: ROLES[n].mode === "doc" ? `${ROLES[n].artifact} under target` : ROLES[n].mode === "code" ? "code + one commit" : "nothing",
-      needs: [ROLES[n].needsTask ? "target = task file" : null, ROLES[n].needsInstruction ? "instruction" : null, ROLES[n].caps === "code" ? "task frontmatter" : null].filter(Boolean),
+      needs: [ROLES[n].needsTask ? "target = task file" : null, ROLES[n].needsInstruction ? "instruction" : null, ROLES[n].synthetic ? "paths + test_command" : ROLES[n].caps === "code" ? "task frontmatter" : null].filter(Boolean),
       judged_by: ROLES[n].mode,
       blocks_by_default: Boolean(ROLES[n].wait),
     }))
@@ -249,13 +250,15 @@ server.tool(
   "Delegate one phase to DeepSeek. role decides prompt, capabilities, and the acceptance gate. Waits up to ~45s, then returns a job_id to poll.",
   {
     role: z.string().describe(`One of: ${ROLE_NAMES.join(", ")}`),
-    target: z.string().describe("specs/<feature> for doc roles; the task .md file for impl/fix/test; a path for ask"),
-    instruction: z.string().optional().describe("Brief for spec, question for ask, extra steer for others"),
+    target: z.string().describe("specs/<feature> for doc roles (spec, plan, tasks, research); the task .md file for impl/fix/test; a path for ask; the directory or file the change is about for do"),
+    instruction: z.string().optional().describe("Brief for spec, question for ask and research, the whole task for do, extra steer for others"),
     feedback_path: z.string().optional().describe("Review markdown to address; required for role=fix"),
     wait: z.boolean().optional().describe("false = return a job_id immediately; true = wait as long as allowed"),
     branch: z.string().optional().describe("review only: branch to review (default: newest code branch for the feature)"),
+    paths: z.array(z.string()).optional().describe("do only (required): globs the job may change, each with a literal folder before its wildcard, e.g. src/lib/**"),
+    test_command: z.string().optional().describe("do only (required): npm test, npm run <script>, or node --test <paths>"),
   },
-  async ({ role: roleName, target, instruction, feedback_path, wait, branch: reviewBranchParam }) => {
+  async ({ role: roleName, target, instruction, feedback_path, wait, branch: reviewBranchParam, paths: doPaths, test_command: doTestCommand }) => {
     const role = (ROLE_NAMES as readonly string[]).includes(roleName) ? ROLES[roleName as RoleName] : undefined;
     if (!role) return blocked(`unknown role "${roleName}"; use one of ${ROLE_NAMES.join(", ")}`);
     const roleKey = roleName as RoleName;
@@ -293,6 +296,14 @@ server.tool(
       if (problems.length) return blocked(`task ${targetRel} is not runnable: ${problems.join("; ")}`);
     }
 
+    // A free-form job has no task file: the call itself supplies the scope and the test command, so they are validated here,
+    // before any model call, by the same rules a task file's front matter gets (plus the stricter ones for `do`).
+    if (role.synthetic) {
+      const problems = doCallProblems(doPaths, doTestCommand);
+      if (problems.length) return blocked(`role=${roleName} is not runnable: ${problems.join("; ")}`);
+      task = syntheticTask({ rel: targetRel, paths: doPaths as string[], testCommand: String(doTestCommand), body: String(instruction) });
+    }
+
     let feedback: string | null = null;
     if (feedback_path) {
       try {
@@ -305,7 +316,9 @@ server.tool(
 
     // The human's rules, enforced: no identical retry of a failed call, and a cap on fix rounds.
     const history = allJobs();
-    const key = crypto.createHash("sha1").update([roleName, targetRel, instruction || "", feedback || ""].join("\0")).digest("hex");
+    // The key is built from the caller's inputs. For a free-form job that includes the scope and the test command, so a changed
+    // `paths` is a changed call, and an identical failed call is still refused. (Other roles keep their original key.)
+    const key = callKey({ role: roleName, target: targetRel, instruction, feedback, synthetic: role.synthetic, paths: doPaths, testCommand: doTestCommand, branch: reviewBranchParam });
     const prior = history.filter((j) => j.key === key).pop();
     if (prior && prior.state === "failed" && !prior.result?.infra) {
       return blocked(`identical to failed job ${prior.jobId}; read its reasons and change the instruction, task or feedback instead of retrying`, { prior_reasons: prior.result?.reasons ?? [] });
@@ -316,6 +329,9 @@ server.tool(
         return json({ status: "escalate", reason: `${used} fix round(s) already used on ${targetRel} (max ${CFG.maxFixRounds}); hand this back to the human` });
       }
     }
+
+    // The job id exists before the branch does, so a branch name can carry it.
+    const jobId = crypto.randomUUID().slice(0, 8);
 
     // Where the human is now (we return here when the job ends) and where the job should work.
     const baseBranch = git(["rev-parse", "--abbrev-ref", "HEAD"]).out;
@@ -334,7 +350,7 @@ server.tool(
         const co = git(["checkout", branch]);
         if (!co.ok) return blocked(`cannot switch to ${branch}: ${co.out}`);
       } else {
-        branch = `${roleName}/${task?.id ?? "x"}-${Date.now().toString(36)}`;
+        branch = role.synthetic ? `${roleName}/${jobId}-${Date.now().toString(36)}` : `${roleName}/${task?.id ?? "x"}-${Date.now().toString(36)}`;
         const co = git(["checkout", "-b", branch, plan.from]);
         if (!co.ok) return blocked(`branch create failed: ${co.out}`);
         createdBranch = true;
@@ -352,7 +368,6 @@ server.tool(
     const startedSha = git(["rev-parse", "HEAD"]).out;
     const startedChanges = snapshot();
 
-    const jobId = crypto.randomUUID().slice(0, 8);
     const promptPath = path.join(CFG.jobs, `${jobId}.prompt.txt`);
     const pack = buildContextPack({ scope: task ? scopeFor(roleName, task) : [], targetRel });
     const prompt = buildPrompt(roleKey, { target: targetRel, instruction, feedback, task, pack });
@@ -375,6 +390,7 @@ server.tool(
       startedFrom,
       task: task?.id ?? null,
       allowedPaths: task?.allowedPaths ?? [],
+      ...(role.synthetic ? { synthetic: true, testCommand: task?.testCommand ?? null } : {}),
       startedSha,
       startedChanges,
       logPath: path.join(CFG.jobs, `${jobId}.log`),

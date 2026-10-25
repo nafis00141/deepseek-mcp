@@ -125,6 +125,38 @@ export function isDeniedRead(file: string): boolean {
 /** A glob that names a test location (tests/**, test/**, **\/*.test.ts, ...). specs/ is NOT a test path. */
 export const isTestGlob = (g: string): boolean => /(^|\/)(tests?|__tests__)(\/|$)|\.(test|spec)\b/i.test(String(g).replace(/\\/g, "/"));
 
+/* --------------------------------------------------- free-form (`do`) jobs: no task file */
+
+/** An in-memory task for a `do` job: scope and test command come from the call, the instruction is the body. */
+export function syntheticTask(p: { rel: string; paths: string[]; testCommand: string; body: string }): Task {
+  return { path: "", rel: p.rel, id: "do", allowedPaths: p.paths.map(normRel), dependsOn: [], testCommand: p.testCommand.trim(), body: p.body.trim() };
+}
+
+/**
+ * Problems with the `paths` of a `do` call, found before any model call. On top of the task-file rules (not empty, not catch-all,
+ * no protected location, does not leave the repo) every glob needs a literal folder before its first wildcard: `src/lib/**` and
+ * `src/util.js` are fine, `**` + `/*.ts`, `*.js` and `src*` + `/x` are not, because they would let a free-form job reach and edit
+ * the tests that decide its own result.
+ */
+export function doScopeProblems(paths: readonly string[] | undefined): string[] {
+  if (!paths || !paths.length) return ["paths is required for role=do (a list of globs the job may change)"];
+  const out = scopeProblems(paths);
+  for (const g of paths) {
+    const n = normRel(g);
+    const wildcard = n.search(/[*?]/);
+    if (wildcard >= 0 && !n.slice(0, wildcard).includes("/")) out.push(`"${g}" has no literal folder before its wildcard (use src/lib/** rather than **/*.ts)`);
+  }
+  return out;
+}
+
+/** The only test commands a `do` job may declare: `npm test`, `npm run <script>`, or `node --test <explicit paths>`. */
+export function doTestCommandProblem(cmd: string | undefined): string | null {
+  const c = String(cmd ?? "").trim();
+  if (!c) return "test_command is required for role=do";
+  if (/^npm test$/.test(c) || /^npm run [\w:.-]+$/.test(c) || /^node --test(?: [\w./\\:-]+)+$/.test(c)) return null;
+  return `test_command "${c}" is not allowed for role=do: use "npm test", "npm run <script>" or "node --test <paths>" (explicit paths, no globs or shell syntax)`;
+}
+
 /** The globs a role may actually write. The `test` role is narrowed to test globs and fails closed. */
 export function scopeFor(roleName: string, task: Pick<Task, "allowedPaths"> | null | undefined): string[] {
   const all = task?.allowedPaths ?? [];

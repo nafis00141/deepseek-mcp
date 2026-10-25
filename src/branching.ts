@@ -3,7 +3,7 @@ import type { Task } from "./taskfile.ts";
 import type { Job } from "./types.ts";
 
 const SAFE = /^[A-Za-z0-9._/-]+$/;
-const CODE_ROLES: readonly string[] = ["impl", "fix", "test"];
+const CODE_ROLES: readonly string[] = ["impl", "fix", "test", "do"];
 
 export const branchExists = (b: string | null | undefined): boolean => typeof b === "string" && b !== "" && SAFE.test(b) && git(["rev-parse", "--verify", "--quiet", `refs/heads/${b}`]).ok;
 const isMerged = (branch: string, base: string): boolean => git(["merge-base", "--is-ancestor", branch, base]).ok;

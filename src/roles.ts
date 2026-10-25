@@ -105,6 +105,27 @@ ${fb}
    SPEC_GAP: <one line explaining the conflict>`;
 };
 
+const doRole = ({ task, instruction }: PromptCtx): string => {
+  const scope = task?.allowedPaths?.length ? task.allowedPaths.join(", ") : "(nothing: you will have no write access)";
+  return `${COMMON}
+
+# Role: FREE-FORM IMPLEMENTER
+There is no spec and no task file. The instruction below is the whole task. You do not plan, re-scope, or refactor beyond it.
+
+# Task
+${instruction || task?.body || "(no instruction)"}
+
+# Hard rules
+1. Only create or modify files matching: ${scope}
+2. Never touch specs/, .claude/, .vscode/, .github/, .env files, lockfiles, or anything outside rule 1 (the server blocks these writes).
+3. Run the tests with run_tests until they pass: ${task?.testCommand || "(no command declared)"}
+   The harness runs them again when you finish; if they fail you will be asked to repair, a limited number of times.
+4. Do NOT run git and do NOT commit. The harness commits your work after you finish.
+5. If the task is contradictory or impossible: change NOTHING and print exactly
+   SPEC_GAP: <one line explaining the conflict>
+6. Make the smallest change that does what is asked.`;
+};
+
 const test = ({ task, instruction }: PromptCtx): string => `${COMMON}
 
 # Role: TEST AUTHOR
@@ -186,13 +207,14 @@ export const ROLES: Record<RoleName, RoleSpec> = {
   test: { caps: "code", mode: "code", branch: true, needsTask: true, wait: 0, title: "Add tests for one task without touching production code" },
   review: { caps: "readonly", mode: "review", wait: 150, title: "Read-only spec-vs-diff review, returns verdict JSON" },
   ask: { caps: "readonly", mode: "text", needsInstruction: true, wait: 90, title: "Read-only question about the repo, answered with citations" },
+  do: { caps: "code", mode: "code", branch: true, synthetic: true, needsInstruction: true, wait: 0, title: "Free-form change inside the given paths (needs paths + test_command), commit, verify" },
   research: { caps: "research", mode: "doc", artifact: "research.md", headings: ["## Question", "## Findings", "## Evidence", "## Open questions"], needsInstruction: true, wait: 150, title: "Read-only research written to specs/<feature>/research.md, with every citation checked" },
 };
 
 export const ROLE_NAMES = Object.keys(ROLES) as RoleName[];
 
 export function buildPrompt(roleName: RoleName, ctx: PromptCtx): string {
-  const builders: Record<RoleName, (c: PromptCtx) => string> = { spec, plan, tasks, impl, fix: impl, test, review, ask, research };
+  const builders: Record<RoleName, (c: PromptCtx) => string> = { spec, plan, tasks, impl, fix: impl, test, review, ask, research, do: doRole };
   const body = builders[roleName](ctx);
   if (!ctx.pack) return body;
   return `${body}

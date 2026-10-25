@@ -77,6 +77,7 @@ try {
   const handoff = (await request<{ tools: ToolInfo[] }>(3, "tools/list", {})).tools.find((t) => t.name === "handoff");
   const props = Object.keys(handoff?.inputSchema?.properties ?? {});
   if (!props.includes("role") || !props.includes("target")) throw new Error(`handoff schema looks wrong: ${JSON.stringify(props)}`);
+  for (const p of ["paths", "test_command"]) if (!props.includes(p)) throw new Error(`handoff schema is missing the ${p} parameter (role=do): ${JSON.stringify(props)}`);
 
   const call = await request<{ content: { text: string }[] }>(4, "tools/call", { name: "version", arguments: {} });
   const info = JSON.parse(call.content[0]?.text ?? "{}") as { keyPresent?: boolean; version?: string; node?: string };

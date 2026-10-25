@@ -1,6 +1,6 @@
 import type { Task } from "./taskfile.ts";
 
-export type RoleName = "spec" | "plan" | "tasks" | "impl" | "fix" | "test" | "review" | "ask" | "research";
+export type RoleName = "spec" | "plan" | "tasks" | "impl" | "fix" | "test" | "review" | "ask" | "research" | "do";
 export type Mode = "doc" | "code" | "review" | "text";
 
 /** What the harness knows about one role: how it is run and how it is judged. */
@@ -12,6 +12,8 @@ export interface RoleSpec {
   headings?: string[];
   needsInstruction?: boolean;
   needsTask?: boolean;
+  /** Free-form code role: no task file; the call supplies `paths` and `test_command`, and the instruction is the task. */
+  synthetic?: boolean;
   requiresTaskFrontmatter?: boolean;
   branch?: boolean;
   wait: number;
@@ -139,6 +141,9 @@ export interface Job {
   commit?: string | null;
   commitError?: string | null;
   endSha?: string;
+  /** A free-form job: its scope (`allowedPaths`) and test command live here, and the gate trusts these, not a file on the branch. */
+  synthetic?: boolean;
+  testCommand?: string | null;
   discardedAt?: string;
 }
 

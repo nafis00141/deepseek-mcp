@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CFG } from "./config.ts";
 import { changedFiles, commitsBetween, diffFilesAgainst, diffFilesBetween, diffSize, parseSummary, rel, resolveInRepo, runCmd, snapshot, toPosix } from "./repo.ts";
-import { globsOverlap, isDeniedRead, isDeniedWrite, matchAny, normRel, readTask, scopeFor, scopeProblems } from "./taskfile.ts";
+import { doScopeProblems, doTestCommandProblem, globsOverlap, isDeniedRead, isDeniedWrite, matchAny, normRel, readTask, scopeFor, scopeProblems, syntheticTask } from "./taskfile.ts";
 import type { Task } from "./taskfile.ts";
 import type { VerifyProblem } from "./engine.ts";
 import type { ExecResult, Job, JobResult } from "./types.ts";
@@ -61,7 +61,7 @@ export function makeVerifier(mode: string, task: Task | null | undefined): ((tex
 }
 
 /** `npm test` / `npm run x` must exist in package.json; other commands are not second-guessed. */
-function testCommandProblem(cmd: string): string | null {
+export function testCommandProblem(cmd: string): string | null {
   const m = /^npm\s+(?:run\s+(\S+)|(test))\b/.exec(cmd.trim());
   if (!m) return null;
   try {
@@ -71,6 +71,18 @@ function testCommandProblem(cmd: string): string | null {
   } catch {
     return "test_command uses npm but package.json is unreadable";
   }
+}
+
+/** Everything wrong with the scope and test command of a free-form call, found before any model call. */
+export function doCallProblems(paths: readonly string[] | undefined, testCommand: string | undefined): string[] {
+  const problems = [...doScopeProblems(paths)];
+  const form = doTestCommandProblem(testCommand);
+  if (form) problems.push(form);
+  else {
+    const npm = testCommandProblem(String(testCommand));
+    if (npm) problems.push(npm);
+  }
+  return problems;
 }
 
 /* ------------------------------------------------------------------ citations */
@@ -231,7 +243,9 @@ function docGate(job: Job, res: ExecResult | null): JobResult {
 
 /** impl / fix / test: code, judged by the repo itself. */
 async function codeGate(job: Job, res: ExecResult | null): Promise<JobResult> {
-  const task = readTask(job.targetRel);
+  // A free-form job is judged against the scope and test command saved in its record when the call was accepted, never a file
+  // read back after checkout: a branch could carry a different version of any file, and a `do` job has no task file at all.
+  const task = job.synthetic ? syntheticTask({ rel: job.targetRel, paths: job.allowedPaths, testCommand: job.testCommand ?? "", body: "" }) : readTask(job.targetRel);
   const scope = scopeFor(job.role, task);
   const files = diffFilesBetween(job.startedSha);
   const commits = commitsBetween(job.startedSha);
